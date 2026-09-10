@@ -1,6 +1,7 @@
 import { isTaskRequest } from "../../extension/protocol.js";
 import { pingSocket, sendRpc } from "./rpc.js";
 const MAX_BODY_SIZE = 128 * 1024;
+const MAX_RESPONSE_SIZE = 16 * 1024 * 1024;
 const RPC_TIMEOUT_MS = 30_000;
 const READ_RPC_TIMEOUT_MS = 8_000;
 const DEVICE_AUTH_TIMEOUT_MS = 5_000;
@@ -31,9 +32,26 @@ function bearerToken(headers) {
 }
 
 async function readJson(request) {
-  const text = await request.text();
-  if (text.length > MAX_BODY_SIZE) {
-    throw Object.assign(new Error("Request body too large"), { status: 413, code: "request_body_too_large" });
+  const reader = request.body?.getReader();
+  const decoder = new TextDecoder();
+  let text = "", bytes = 0;
+  if (reader) {
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; void reader.cancel().catch(() => {}); }, RPC_TIMEOUT_MS);
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (timedOut) throw Object.assign(new Error("Request body timed out"), { status: 408, code: "request_body_timeout" });
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > MAX_BODY_SIZE) {
+          void reader.cancel().catch(() => {});
+          throw Object.assign(new Error("Request body too large"), { status: 413, code: "request_body_too_large" });
+        }
+        text += decoder.decode(value, { stream: true });
+      }
+      text += decoder.decode();
+    } finally { clearTimeout(timer); reader.releaseLock(); }
   }
   if (!text.trim()) return {};
   try { return JSON.parse(text); }
@@ -88,6 +106,7 @@ export class BrowserRelayDevice {
     this.lastSeen = null;
     this.hello = null;
     this.pending = new Map();
+    this.authenticatingSockets = new Set();
     // In-memory only — nothing is persisted. A route exists only while its device
     // is connected (the DO stays resident on the open WS); once it drops and the DO
     // evicts, all state is gone. No storage writes → no zombie routes to clean up.
@@ -99,9 +118,9 @@ export class BrowserRelayDevice {
   async fetch(request) {
     const url = new URL(request.url);
     try {
-      if (url.pathname === "/v1/device/connect") return this.handleDeviceConnect(request, url);
-      if (url.pathname === "/v1/rpc") return this.handleRpc(request);
-      if (url.pathname === "/v1/status") return this.handleStatus(request);
+      if (url.pathname === "/v1/device/connect") return await this.handleDeviceConnect(request, url);
+      if (url.pathname === "/v1/rpc") return await this.handleRpc(request);
+      if (url.pathname === "/v1/status") return await this.handleStatus(request);
       return jsonResponse(errorPayload("endpoint_not_found", `Unknown device endpoint: ${url.pathname}`, { status: 404 }), 404);
     } catch (err) {
       const status = err.status || 500;
@@ -135,28 +154,45 @@ export class BrowserRelayDevice {
     if (request.headers.get("Upgrade") !== "websocket") {
       return jsonResponse(errorPayload("upgrade_required", "WebSocket upgrade required", { status: 426 }), 426);
     }
+    if (this.authenticatingSockets.size >= 10) {
+      return jsonResponse(errorPayload("connection_limit", "Too many unauthenticated connections", { status: 429 }), 429);
+    }
     const { client, server } = websocketPair();
     server.accept();
-    let authenticated = false;
+    this.authenticatingSockets.add(server);
+    let authenticated = false, authenticating = false, closed = false;
+    const cleanup = () => {
+      closed = true;
+      clearTimeout(authTimer);
+      this.authenticatingSockets.delete(server);
+      this.handleDeviceClose(server);
+    };
+    const close = (code, reason) => { cleanup(); server.close(code, reason); };
     const authTimer = setTimeout(() => {
-      if (!authenticated) server.close(4008, "authentication timeout");
+      if (!authenticated) close(4008, "authentication timeout");
     }, DEVICE_AUTH_TIMEOUT_MS);
 
     const authenticate = async (secret) => {
       if (authenticated) return true;
+      if (authenticating || closed) return false;
+      authenticating = true;
       const auth = await this.authorize(secret, { claim: true, routeId: url.searchParams.get("routeId") || "" });
+      if (closed) return false;
       if (!auth.ok) {
-        clearTimeout(authTimer);
-        server.close(4003, "authentication failed");
+        close(4003, "authentication failed");
         return false;
       }
-      if (this.deviceSocket && this.deviceSocket.readyState === WebSocket.OPEN && this.deviceSocket !== server) {
-        try { this.deviceSocket.close(4001, "superseded"); } catch {}
+      if (this.deviceSocket && this.deviceSocket !== server) {
+        const previous = this.deviceSocket;
+        this.handleDeviceClose(previous);
+        try { previous.close(4001, "superseded"); } catch {}
       }
       this.deviceSocket = server;
+      this.hello = null;
       this.connectedAt = new Date().toISOString();
       this.lastSeen = this.connectedAt;
       authenticated = true;
+      this.authenticatingSockets.delete(server);
       clearTimeout(authTimer);
       server.send(JSON.stringify({ type: "device.authenticated" }));
       return true;
@@ -169,28 +205,28 @@ export class BrowserRelayDevice {
 
     server.addEventListener("message", (event) => {
       void (async () => {
+        if (closed) return;
+        if (typeof event.data !== "string" || new TextEncoder().encode(event.data).byteLength > (authenticated ? MAX_RESPONSE_SIZE : MAX_BODY_SIZE)) {
+          if (authenticated) this.handleDeviceClose(server, "response_body_too_large");
+          close(1009, "message too large");
+          return;
+        }
         let msg;
-        try { msg = JSON.parse(String(event.data)); } catch { return; }
+        try { msg = JSON.parse(event.data); } catch { close(1007, "invalid JSON"); return; }
+        if (!msg || typeof msg !== "object") { close(1007, "invalid message"); return; }
         if (!authenticated) {
           if (msg.type === "device.auth" && typeof msg.secret === "string") await authenticate(msg.secret);
           else {
-            clearTimeout(authTimer);
-            server.close(4003, "authenticate first");
+            close(4003, "authenticate first");
           }
           return;
         }
         if (msg.type === "device.auth") return;
         this.handleDeviceMessage(server, event.data);
-      })();
+      })().catch(() => close(1011, "connection failed"));
     });
-    server.addEventListener("close", () => {
-      clearTimeout(authTimer);
-      if (authenticated) this.handleDeviceClose(server);
-    });
-    server.addEventListener("error", () => {
-      clearTimeout(authTimer);
-      if (authenticated) this.handleDeviceClose(server);
-    });
+    server.addEventListener("close", cleanup);
+    server.addEventListener("error", cleanup);
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -214,13 +250,13 @@ export class BrowserRelayDevice {
     }
   }
 
-  handleDeviceClose(socket) {
+  handleDeviceClose(socket, code = "remote_device_offline") {
     if (this.deviceSocket !== socket) return;
     this.deviceSocket = null;
     this.lastSeen = new Date().toISOString();
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer);
-      pending.reject(errorPayload("remote_device_offline", "Remote Browser Relay device disconnected", { status: 409, retryable: true }));
+      pending.reject(errorPayload(code, code === "response_body_too_large" ? "Remote response exceeds size limit; reduce screenshot dimensions" : "Remote Browser Relay device disconnected", { status: code === "response_body_too_large" ? 413 : 409, retryable: code !== "response_body_too_large" }));
       this.pending.delete(id);
     }
   }
@@ -276,10 +312,12 @@ export class BrowserRelayDevice {
       throw errorPayload("remote_device_offline", "Remote Browser Relay device is offline", { status: 409, retryable: true });
     }
     if (this.isLastSeenStale()) {
+      const socket = this.deviceSocket;
       try {
         await pingSocket(this.deviceSocket, this.pending, { signal, timeoutMs: this.pingTimeoutMs });
-      } catch {
-        this.dropDevice("stale");
+      } catch (error) {
+        if (error.code === "remote_device_busy" || error.code === "request_cancelled") throw error;
+        if (this.deviceSocket === socket) this.dropDevice("stale");
         throw errorPayload("remote_device_offline", "Remote Browser Relay device is offline", { status: 409, retryable: true });
       }
     }
@@ -321,7 +359,7 @@ export default {
       }
 
       if (request.method === "POST" && url.pathname === "/v1/rpc") {
-        const body = await readJson(request.clone());
+        const body = await readJson(request);
         const routeId = String(body.routeId || "");
         if (!isRouteId(routeId)) return jsonResponse(errorPayload("invalid_remote_device", "Invalid route id", { status: 401 }), 401);
         const id = env.DEVICES.idFromName(routeId);

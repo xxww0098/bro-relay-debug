@@ -31,6 +31,7 @@ export function sendRpc(socket, pending, request, {signal, timeoutMs=30000}={}) 
     };
     const abort=()=>fail('request_cancelled','Remote request cancelled; completed actions were not undone',409);
     if(pending.has(id)) {reject({ok:false,code:'duplicate_rpc',message:'RPC id is already pending',status:409,retryable:false});return;}
+    if(pending.size >= 32) {reject({ok:false,code:'remote_device_busy',message:'Remote device pending limit reached',status:429,retryable:true});return;}
     if(signal?.aborted) {abort();return;}
     pending.set(id,{resolve:value=>finish(resolve,value),reject:value=>finish(reject,tracked?{...value,taskId,sessionId,retryable:false}:value)});
     signal?.addEventListener('abort',abort,{once:true});
@@ -49,6 +50,7 @@ export function pingSocket(socket, pending, {signal, timeoutMs=2000}={}) {
     const fail=(code,message,status)=>finish(reject,{ok:false,code,message,error:message,status,retryable:true});
     const abort=()=>fail('request_cancelled','Remote request cancelled; completed actions were not undone',409);
     if(pending.has(id)) {reject({ok:false,code:'duplicate_rpc',message:'RPC id is already pending',status:409,retryable:false});return;}
+    if(pending.size >= 32) {reject({ok:false,code:'remote_device_busy',message:'Remote device pending limit reached',status:429,retryable:true});return;}
     if(signal?.aborted) {abort();return;}
     if(!socket || socket.readyState !== 1) {fail('remote_device_offline','Remote Browser Relay device is offline',409);return;}
     pending.set(id,{resolve:value=>finish(resolve,value),reject:value=>finish(reject,value)});
