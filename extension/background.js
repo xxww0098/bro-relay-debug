@@ -4,6 +4,7 @@ import { createRemoteControl } from './remote-control.js';
 import { createAutomation } from './automation.js';
 import { isAutomationPath, PROTOCOL_VERSION, FEATURES } from './protocol.js';
 import { checkCancelled } from './tasks.js';
+import { createTakeover } from './takeover.js';
 
 const runtimeId = crypto.randomUUID();
 const executorInfo = () => ({ extensionVersion: chrome.runtime.getManifest().version, runtimeId, protocolVersion: PROTOCOL_VERSION, features: FEATURES });
@@ -19,10 +20,16 @@ function publicTabIdFor(tabId) {
     } while (issuedPublicTabIds.has(id));
     issuedPublicTabIds.add(id);
     publicTabIds.set(tabId, id);
+    tabIdsDirty = true;
   }
   return publicTabIds.get(tabId);
 }
+let tabIdsDirty = false;
 function persistState() {
+  // A stable public id only needs writing when the mapping actually changed;
+  // listing tabs is a read command and should stay one.
+  if (!tabIdsDirty) return Promise.resolve();
+  tabIdsDirty = false;
   return chrome.storage.session.set({ publicTabIds: [...publicTabIds], issuedPublicTabIds: [...issuedPublicTabIds] });
 }
 const ready = (async () => {
@@ -33,18 +40,20 @@ const ready = (async () => {
     try { await chrome.tabs.get(tabId); publicTabIds.set(tabId, id); issuedPublicTabIds.add(id); } catch { /* Closed while suspended. */ }
   }
 })();
+// Structured so the CLI can report a bad tab id as a 404 instead of a 500.
+const relayError = (code, message, status) => Object.assign(new Error(message), { code, status });
 async function resolveRemoteTabId(id) {
   await ready;
   for (const [tabId, publicId] of publicTabIds) {
     if (id !== publicId) continue;
     const tab = await chrome.tabs.get(tabId);
-    if (!isAttachableUrl(tab.url)) throw new Error('Page is no longer controllable');
+    if (!isAttachableUrl(tab.url)) throw relayError('tab_not_found', 'Page is no longer controllable', 404);
     return tabId;
   }
-  throw new Error('Unknown or missing tabId; list tabs again');
+  throw relayError('tab_not_found', 'Unknown or missing tabId; list tabs again', 404);
 }
 async function ensureRemoteAttached(tabId) {
-  if (!control.isConnected()) throw new Error('Remote control is disabled or disconnected');
+  if (!control.isConnected()) throw relayError('remote_control_disabled', 'Remote control is disabled or disconnected', 409);
   if (tabs.has(tabId)) { tabs.get(tabId).lastActivity = Date.now(); return; }
   if (attachPromises.has(tabId)) return attachPromises.get(tabId);
   const pending = (async () => {
@@ -72,6 +81,7 @@ async function remoteCdp(tabId, method, params, sessionId, signal) {
 async function stopControl() {
   automation.cancelAll();
   automation.disconnect('remote');
+  await takeover.stopAll();
   await Promise.allSettled([...attachPromises.values()]);
   await Promise.allSettled([...tabs.keys()].map(tabId => chrome.debugger.detach({ tabId })));
   for (const tabId of tabs.keys()) automation.close(tabId);
@@ -90,6 +100,7 @@ async function apiListTabs() {
 }
 async function executeRemoteApi(method, path, body, signal) {
   await ready;
+  await takeoverReady;
   checkCancelled(signal);
   if (!control.isConnected()) throw new Error('Remote control stopped');
   const url = new URL(path, 'http://relay.local');
@@ -122,6 +133,8 @@ function base64Bytes(d) {
 async function apiScreenshot(body, searchParams) {
   const tabId = await resolveRemoteTabId(body.tabId ?? searchParams.get('tabId'))
   const fullPage = body.fullPage === true || searchParams.get('fullPage') === 'true'
+  // The page-local action hint is operator feedback, never part of the evidence.
+  await automation.dismissOverlay(tabId)
 
   if (fullPage) {
     let width = null, height = null, fallbackError = null
@@ -301,9 +314,24 @@ async function apiNetwork(body, params) {
   return { ok: true, entries: selected, count: selected.length, total: matched.length, storedTotal: networkEntries.length }
 }
 
+const takeover = createTakeover({
+  tabs: chrome.tabs,
+  previewUrl: chrome.runtime.getURL('preview.html'),
+  setFocus: (tabId, enabled, signal) => enabled
+    ? remoteCdp(tabId, 'Emulation.setFocusEmulationEnabled', { enabled }, undefined, signal)
+    : chrome.debugger.sendCommand({ tabId }, 'Emulation.setFocusEmulationEnabled', { enabled }),
+  capture: async (tabId, signal) => {
+    const frame = await remoteCdp(tabId, 'Page.captureScreenshot', { format: 'jpeg', quality: 70, captureBeyondViewport: false }, undefined, signal);
+    return `data:image/jpeg;base64,${frame.data}`;
+  },
+  onStop: () => control.set({ enabled: false }),
+});
+const takeoverReady = takeover.recover();
 const automation = createAutomation({
   runtimeInfo: executorInfo, publicTabId: publicTabIdFor, resolveTab: resolveRemoteTabId,
   send: remoteCdp,
+  beginTask: takeover.enter,
+  endTask: takeover.leave,
   createTab: async url => {
     if (!isAttachableUrl(url)) throw new Error('Only HTTP(S) and about:blank are supported');
     if (!control.isConnected()) throw new Error('Remote control stopped');
@@ -318,7 +346,7 @@ const automation = createAutomation({
     checkCancelled(signal);
     await chrome.windows.update(tab.windowId, { focused: true });
     checkCancelled(signal);
-    await chrome.tabs.update(tabId, { active: true });
+    await chrome.tabs.update(takeover.previewFor(tabId) ?? tabId, { active: true });
   },
 });
 const control = createRemoteControl({
@@ -332,7 +360,15 @@ const control = createRemoteControl({
     void chrome.runtime.sendMessage({ type: 'remoteStatusChanged', ...state }).catch(() => {});
   },
 });
-chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (message?.type === 'getTakeoverPreview') {
+    takeover.read(sender.tab?.id).then(respond);
+    return true;
+  }
+  if (message?.type === 'stopTakeover' && takeover.isPreview(sender.tab?.id)) {
+    control.set({ enabled: false }).then(respond, error => respond({ error: error.message }));
+    return true;
+  }
   if (message?.type === 'setRemoteControl') {
     control.set({ enabled: message.enabled, rotate: message.rotate ?? false }).then(respond, error => respond({ ...control.status(), lastError: error.message }));
     return true;
@@ -354,10 +390,14 @@ chrome.debugger.onDetach.addListener(({ tabId }) => {
   tabs.delete(tabId);
   consoleCaptureTabs.delete(tabId); networkCaptureTabs.delete(tabId);
   automation.close(tabId);
+  void takeover.onRemoved(tabId);
 });
+chrome.tabs.onActivated.addListener(({ tabId }) => void takeover.onActivated(tabId));
 chrome.tabs.onRemoved.addListener(tabId => {
-  publicTabIds.delete(tabId); tabs.delete(tabId);
+  if (publicTabIds.delete(tabId)) tabIdsDirty = true;
+  tabs.delete(tabId);
   automation.close(tabId);
+  void takeover.onRemoved(tabId);
   void persistState();
 });
 chrome.alarms.create('bro-keepalive', { periodInMinutes: 0.5 });

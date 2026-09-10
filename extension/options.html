@@ -13,6 +13,10 @@
       <div><label for="remoteToggle">远程控制</label><p id="remoteState">关闭</p></div>
       <input id="remoteToggle" class="switch" type="checkbox" role="switch" aria-label="启用远程控制">
     </section>
+    <section id="takeoverStop" class="takeover-stop" hidden aria-label="停止并接管">
+      <button id="stopTakeover" type="button">停止并接管</button>
+      <p class="hint">停止所有代理任务并关闭远程控制，驱动 ID 保留。</p>
+    </section>
     <section id="remoteDetails" hidden>
       <div class="id-heading"><label for="remoteDeviceId">驱动 ID</label><span>点击复制</span></div>
       <textarea id="remoteDeviceId" rows="2" readonly spellcheck="false" aria-describedby="idHint"></textarea>

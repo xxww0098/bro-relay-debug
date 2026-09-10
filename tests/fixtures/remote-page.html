@@ -5,6 +5,41 @@
 <label>Message <input id="message" value="hello"></label>
 <button id="apply">Apply</button>
 <p id="result">Waiting</p>
+<div style="height: 1400px" aria-hidden="true"></div>
+<p id="scroll-marker">Scroll marker</p>
+<button id="moving" style="position: relative">Moving</button>
+<span id="moving-count">0</span>
+<button id="blocked">Blocked</button>
+<span id="blocked-count">0</span>
+<div id="blocker" hidden>Blocker</div>
+<div id="feeder" style="height: 120px; overflow: auto"><div style="height: 600px">feed</div></div>
+<label><input type="checkbox" id="rebind"> Rebinds on change</label>
+<style>
+  #blocker { position: fixed; inset: 0; z-index: 2; background: rgb(255 255 255 / 0.01); }
+</style>
 <script>
   apply.onclick = () => { result.textContent = `Applied: ${message.value}` }
+  let movingActive = false
+  let movingClickedWhileActive = false
+  function startMoving() {
+    const movingStarted = performance.now()
+    movingActive = true
+    function moveButton(now) {
+      if (now - movingStarted < 800) {
+        moving.style.transform = `translateX(${Math.round((now - movingStarted) / 10) % 40}px)`
+        requestAnimationFrame(moveButton)
+      } else { moving.style.transform = 'translateX(0px)'; movingActive = false }
+    }
+    requestAnimationFrame(moveButton)
+  }
+  moving.onclick = () => { movingClickedWhileActive = movingActive; const count = document.getElementById('moving-count'); count.textContent = String(Number(count.textContent) + 1) }
+  blocked.onclick = () => { const count = document.getElementById('blocked-count'); count.textContent = String(Number(count.textContent) + 1) }
+  // A framework-style control that replaces its own node when it changes.
+  let rebind = document.getElementById('rebind')
+  rebind.addEventListener('change', () => {
+    const next = rebind.cloneNode(true)
+    next.checked = rebind.checked
+    rebind.replaceWith(next)
+    rebind = next
+  })
 </script>

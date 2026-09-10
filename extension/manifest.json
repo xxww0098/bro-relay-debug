@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bro Relay Debug",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Remote browser debugging relay.",
   "permissions": [
     "debugger",

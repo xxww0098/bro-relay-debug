@@ -1,11 +1,12 @@
 const $ = id => document.getElementById(id);
 const toggle = $('remoteToggle'), state = $('remoteState'), id = $('remoteDeviceId');
-const status = $('remoteStatus'), regenerate = $('regenerateDevice');
+const status = $('remoteStatus'), regenerate = $('regenerateDevice'), stopTakeover = $('stopTakeover');
 function render(value = {}) {
   toggle.checked = !!value.enabled;
   id.value = value.deviceId || '';
   state.textContent = value.enabled ? value.connected ? '已连接' : '连接中' : '关闭';
   state.className = value.connected ? 'connected' : '';
+  $('takeoverStop').hidden = !value.enabled;
   $('remoteDetails').hidden = !value.enabled;
   status.className = value.lastError ? 'status error' : 'status';
   status.textContent = value.enabled
@@ -13,13 +14,14 @@ function render(value = {}) {
     : '启用后，将显示驱动 ID。';
 }
 async function update(enabled, rotate = false) {
-  toggle.disabled = regenerate.disabled = true;
+  toggle.disabled = regenerate.disabled = stopTakeover.disabled = true;
   try { render(await chrome.runtime.sendMessage({ type: 'setRemoteControl', enabled, rotate })); }
   catch (error) { status.textContent = error.message; status.className = 'status error'; }
-  finally { toggle.disabled = regenerate.disabled = false; }
+  finally { toggle.disabled = regenerate.disabled = stopTakeover.disabled = false; }
 }
 toggle.addEventListener('change', () => update(toggle.checked));
 regenerate.addEventListener('click', () => update(true, true));
+stopTakeover.addEventListener('click', () => update(false));
 id.addEventListener('click', async () => {
   id.select();
   try { await navigator.clipboard.writeText(id.value); status.textContent = '驱动 ID 已复制。'; }

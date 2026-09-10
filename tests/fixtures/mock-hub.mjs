@@ -51,6 +51,7 @@ export async function createMockHub() {
   const port = server.address().port
   return {
     url: `http://127.0.0.1:${port}`,
+    disconnect() { for (const route of routes.values()) route.socket.close(); },
     async close() { for (const route of routes.values()) route.socket.close(); await new Promise((resolve) => server.close(resolve)) },
   }
 }

@@ -14,6 +14,16 @@ export function validateHub(value) {
   return url.origin;
 }
 
+export async function buildSkill(root = fileURLToPath(new URL('../', import.meta.url))) {
+  const runtime = join(root, 'skills/bro-connect/scripts/runtime');
+  for (const file of ['cli/index.js', 'cli/sdk.js', 'config.js', 'extension/protocol.js']) {
+    await mkdir(resolve(runtime, file, '..'), { recursive: true });
+    await cp(join(root, file), join(runtime, file));
+  }
+  const { version } = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+  await writeFile(join(runtime, 'package.json'), JSON.stringify({ type: 'module', version }, null, 2) + '\n');
+}
+
 export async function build(root = fileURLToPath(new URL('../', import.meta.url))) {
   let env = {};
   try { env = parseEnv(await readFile(join(root, '.env'), 'utf8')); }
@@ -26,6 +36,7 @@ export async function build(root = fileURLToPath(new URL('../', import.meta.url)
   const manifest = JSON.parse(await readFile(join(root, 'extension/manifest.json'), 'utf8'));
   manifest.host_permissions = [`${hub}/*`];
   await writeFile(join(root, 'extension/manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+  await buildSkill(root);
   const dist = join(root, 'dist');
   await mkdir(dist, { recursive: true });
   await rm(join(dist, 'extension'), { recursive: true, force: true });

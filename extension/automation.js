@@ -2,6 +2,12 @@ import { createTaskQueue, TaskError, checkCancelled, pause } from "./tasks.js";
 import { observationRecords, textPage } from "./observations.js";
 import { createSessions } from "./sessions.js";
 import { PROTOCOL_VERSION, FEATURES } from "./protocol.js";
+import {
+  showActionOverlay,
+  rippleActionOverlay,
+  dismissActionOverlay,
+  OVERLAY_LIFETIME_MS,
+} from "./action-overlay.js";
 
 const valueOf = (v) => v?.value;
 const compact = (s, n = 180) =>
@@ -54,12 +60,32 @@ const NODE_FUNCTION = `function(operation, args) {
     for(let n=element;n;n=n.parentElement||n.getRootNode().host)chain.push([n,n.scrollLeft,n.scrollTop]);
     const beforeX=view.scrollX, beforeY=view.scrollY;
     element.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
-    const r = element.getBoundingClientRect(), s = view.getComputedStyle(element);
-    const visible = r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-    return {visible, disabled:element.matches(':disabled') || !!element.closest('[aria-disabled="true"]'),
-      obscured:!hitTest(r.x+r.width/2,r.y+r.height/2), x:r.x+r.width/2, y:r.y+r.height/2, width:r.width, height:r.height, clientLeft:element.clientLeft, clientTop:element.clientTop,
-      scrolled:beforeX!==view.scrollX||beforeY!==view.scrollY||chain.some(([n,x,y])=>n.scrollLeft!==x||n.scrollTop!==y),
-      background:view.document.visibilityState==='hidden'};
+    const measure = () => {
+      const r = element.getBoundingClientRect(), s = view.getComputedStyle(element);
+      const visible = r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+      return {visible, disabled:element.matches(':disabled') || !!element.closest('[aria-disabled="true"]'),
+        obscured:!hitTest(r.x+r.width/2,r.y+r.height/2), x:r.x+r.width/2, y:r.y+r.height/2, width:r.width, height:r.height, clientLeft:element.clientLeft, clientTop:element.clientTop,
+        scrolled:beforeX!==view.scrollX||beforeY!==view.scrollY||chain.some(([n,x,y])=>n.scrollLeft!==x||n.scrollTop!==y),
+        background:view.document.visibilityState==='hidden'};
+    };
+    const first = measure();
+    // A caller about to press a button wants a position that survives a rendered
+    // frame, not one sampled before the scroll was composited. Measuring twice
+    // inside the page replaces a second round trip plus a fixed 50ms sleep.
+    if (!args.settle || first.background) return first;
+    return new Promise(resolve => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        const second = measure();
+        resolve({...second, scrolled: second.scrolled || first.scrolled,
+          moved: Math.abs(second.x-first.x) > 0.5 || Math.abs(second.y-first.y) > 0.5 ||
+            Math.abs(second.width-first.width) > 0.5 || Math.abs(second.height-first.height) > 0.5});
+      };
+      const timer = view.setTimeout(finish, 100);
+      view.requestAnimationFrame(() => view.requestAnimationFrame(() => { view.clearTimeout(timer); finish(); }));
+    });
   }
   if (operation === 'inspect') {
     const r=element.getBoundingClientRect(), s=view.getComputedStyle(element);
@@ -68,7 +94,7 @@ const NODE_FUNCTION = `function(operation, args) {
       value:this.type==='password'?'[redacted]':this.value, text:(this.innerText||'').slice(0,400)};
   }
   if (operation === 'click') { if(typeof element.click!=='function')return false;element.click(); return true; }
-  if (operation === 'scroll') {element.scrollBy({left:args.deltaX||0,top:args.deltaY||0,behavior:'instant'});return {scrollLeft:element.scrollLeft,scrollTop:element.scrollTop};}
+  if (operation === 'scroll') {const beforeLeft=element.scrollLeft, beforeTop=element.scrollTop;element.scrollBy({left:args.deltaX||0,top:args.deltaY||0,behavior:'instant'});return {scrollLeft:element.scrollLeft,scrollTop:element.scrollTop,moved:element.scrollLeft!==beforeLeft||element.scrollTop!==beforeTop};}
   if (operation === 'focus') {
     const editable=this.isContentEditable || this.tagName==='TEXTAREA' || (this.tagName==='INPUT' && ['text','search','email','tel','url','password','number'].includes(this.type));
     if(!editable || this.readOnly) return {error:'not_editable'};
@@ -108,6 +134,8 @@ export function createAutomation({
   closeTab,
   listTabs,
   focusTab,
+  beginTask,
+  endTask,
   runtimeInfo = () => ({}),
   publicTabId = (id) => id,
 }) {
@@ -120,6 +148,10 @@ export function createAutomation({
     active: queue.active,
   });
   const heldInputs = new Map();
+  // Where and when the last page-local action hint was drawn, so a screenshot can
+  // drop it deterministically instead of racing its own idle timer.
+  const overlayDrawnAt = new Map(),
+    overlayFailures = new Map();
   const signals = new Map(),
     jobOrigins = new Map(),
     sessionOrigins = new Map();
@@ -231,12 +263,13 @@ export function createAutomation({
   }
   async function tree(tabId, includeTarget) {
     const st = state(tabId);
-    {
+    if (!st.autoAttach) {
       await cdp(tabId, "Target.setAutoAttach", {
         autoAttach: true,
         waitForDebuggerOnStart: false,
         flatten: true,
       });
+      st.autoAttach = true;
     }
     const [meta, frames] = await Promise.all([
       evaluate(tabId, metadataExpression),
@@ -507,7 +540,8 @@ export function createAutomation({
         warnings.push({ frameId: frame.id, code: "frame_unattached", message: error.message });
       }
     }
-    st.frames = frameInfo;
+    st.mainFrameId = frames.frameTree.frame.id;
+    st.frameParents = new Map(frameInfo.map((f) => [f.id, f.parentId]));
     return {
       ...meta,
       nodes,
@@ -521,7 +555,9 @@ export function createAutomation({
     // rendered frame, bounded for background tabs whose rAF can be suspended.
     await evaluate(
       tabId,
-      `new Promise(resolve=>{const timer=setTimeout(resolve,100);requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(timer);resolve();}));})`,
+      // A hidden document never runs rAF, so the bounded timer is the only thing
+      // that can resolve there; waiting the full 100ms buys no rendered frame.
+      `new Promise(resolve=>{if(document.visibilityState==='hidden')return resolve();const timer=setTimeout(resolve,100);requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(timer);resolve();}));})`,
       sessionId,
     );
   }
@@ -681,6 +717,8 @@ export function createAutomation({
           functionDeclaration: NODE_FUNCTION,
           arguments: [{ value: operation }, { value: args }],
           returnByValue: true,
+          // prepare may measure, wait for a rendered frame, and measure again.
+          awaitPromise: true,
         },
         node.sessionId,
       );
@@ -703,8 +741,10 @@ export function createAutomation({
         409,
       );
     } finally {
+      // Releasing the handle is bookkeeping for the page heap; the caller does not
+      // wait for it, so it stays off the action's critical path.
       if (objectId)
-        await cdp(
+        void cdp(
           tabId,
           "Runtime.releaseObject",
           { objectId },
@@ -825,35 +865,56 @@ export function createAutomation({
         ).catch(() => {});
     }
   }
+  // Frame geometry is needed only for targets inside a subframe. Reading the
+  // accessibility tree here made the first action on a tab pay for a whole page
+  // scan just to learn that the element sits in the top frame.
+  async function frameParents(tabId) {
+    const st = state(tabId);
+    if (!st.frameParents) {
+      const root = (await cdp(tabId, "Page.getFrameTree")).frameTree,
+        parents = new Map();
+      const walk = (entry, parentId) => {
+        parents.set(entry.frame.id, parentId);
+        for (const child of entry.childFrames || []) walk(child, entry.frame.id);
+      };
+      walk(root, undefined);
+      st.frameParents = parents;
+      st.mainFrameId = root.frame.id;
+    }
+    return st.frameParents;
+  }
   async function frameOffset(tabId, frameId, point) {
     const st = state(tabId);
-    if (!st.frames) await tree(tabId);
+    if (!frameId || frameId === st.mainFrameId) return { x: 0, y: 0 };
+    if (!st.mainFrameId) await frameParents(tabId);
     let x = 0,
       y = 0,
-      frame = st.frames.find((f) => f.id === frameId);
+      frame = { id: frameId, parentId: st.frameParents.get(frameId) };
     while (frame?.parentId) {
-      const parent = st.frames.find((f) => f.id === frame.parentId);
+      const parentSession =
+        children.get(tabId)?.get(frame.parentId)?.sessionId ||
+        st.sessions.get(frame.parentId);
       const owner = await cdp(
         tabId,
         "DOM.getFrameOwner",
         { frameId: frame.id },
-        parent?.sessionId,
+        parentSession,
       );
       const rect = await nodeCall(
         tabId,
-        { backendId: owner.backendNodeId, sessionId: parent?.sessionId },
+        { backendId: owner.backendNodeId, sessionId: parentSession },
         "prepare",
       );
       // A scroll can update DOM geometry before Chromium's compositor routes
       // pointer events to an iframe. Otherwise down/up may hit different frames.
       if (rect.scrolled && !rect.background)
-        await awaitPaint(tabId, parent?.sessionId);
+        await awaitPaint(tabId, parentSession);
       x += rect.x - rect.width / 2 + (rect.clientLeft || 0);
       y += rect.y - rect.height / 2 + (rect.clientTop || 0);
       if (point) {
         const hit = await nodeCall(
           tabId,
-          { backendId: owner.backendNodeId, sessionId: parent?.sessionId },
+          { backendId: owner.backendNodeId, sessionId: parentSession },
           "hitTest",
           { x: point.x + x, y: point.y + y },
         );
@@ -864,7 +925,10 @@ export function createAutomation({
             409,
           );
       }
-      frame = parent;
+      frame = {
+        id: frame.parentId,
+        parentId: st.frameParents.get(frame.parentId),
+      };
     }
     return { x, y };
   }
@@ -896,6 +960,7 @@ export function createAutomation({
         );
       clip = { ...clip, scale: 1 };
     }
+    await dismissOverlay(tabId);
     const { data } = await cdp(tabId, "Page.captureScreenshot", {
       format: "png",
       captureBeyondViewport: !!clip,
@@ -1034,6 +1099,46 @@ export function createAutomation({
     });
     await cdp(tabId, "Input.dispatchKeyEvent", { type: "keyUp", ...base });
   }
+  async function actionOverlay(tabId, expression, preserveCancellation = true) {
+    try {
+      const result = await evaluate(tabId, expression);
+      overlayDrawnAt.set(tabId, Date.now());
+      if (result && result.ok === false) overlayFailures.set(tabId, result.error);
+    } catch (error) {
+      if (preserveCancellation && error?.code === "task_cancelled") throw error;
+    }
+  }
+  // The hint exists for the operator watching the browser; it must never land in
+  // the pixels handed back as evidence.
+  async function dismissOverlay(tabId) {
+    if (Date.now() - (overlayDrawnAt.get(tabId) || 0) > OVERLAY_LIFETIME_MS.max + 250)
+      return;
+    overlayDrawnAt.delete(tabId);
+    try {
+      await evaluate(tabId, dismissActionOverlay());
+    } catch {}
+  }
+  const isRefTarget = (target) =>
+    typeof target === "string"
+      ? /^e[\w]+_\d+$/.test(target)
+      : !!target?.ref;
+  // A control that re-renders on activation replaces its DOM node. Verifying the
+  // new state through the old backend id would report a successful interaction as
+  // a failure, so a re-locatable target gets one fresh lookup.
+  async function readCheckedState(tabId, node, target) {
+    try {
+      return await nodeCall(tabId, node, "checkState");
+    } catch (error) {
+      if (error.code !== "stale_ref" || isRefTarget(target)) throw error;
+      let refreshed;
+      try {
+        refreshed = await resolveNode(tabId, target);
+      } catch {
+        throw error;
+      }
+      return nodeCall(tabId, refreshed, "checkState");
+    }
+  }
   async function perform(tabId, action, signal) {
     checkCancelled(signal);
     const type = action.type;
@@ -1115,12 +1220,21 @@ export function createAutomation({
     let node, rect, targetOffset;
     if (action.target) {
       const deadline = Date.now() + (action.timeoutMs || 0);
-      let previousRect;
+      // Only the action types that can land on a moving target pay for the
+      // in-page settle, and only when the caller asked to wait for stability.
+      const settle =
+        !!action.timeoutMs &&
+        ["click", "double_click", "hover", "drag", "check"].includes(type);
       for (;;) {
         checkCancelled(signal);
         try {
           node = await resolveNode(tabId, action.target);
-          rect = await nodeCall(tabId, node, "prepare");
+          rect = await nodeCall(
+            tabId,
+            node,
+            "prepare",
+            settle ? { settle: true } : {},
+          );
           if (!rect.visible)
             fail("element_not_visible", "Target is not visible", 409);
           if (rect.disabled)
@@ -1131,26 +1245,10 @@ export function createAutomation({
               "Target is covered by another element",
               409,
             );
+          if (rect.moved)
+            fail("element_unstable", "Target is still moving", 409);
           if (type !== "scroll")
             targetOffset = await frameOffset(tabId, node.frameId, rect);
-          if (
-            action.timeoutMs &&
-            ["click", "double_click", "hover", "drag", "check"].includes(type)
-          ) {
-            const position = [
-              rect.x + targetOffset.x,
-              rect.y + targetOffset.y,
-              rect.width,
-              rect.height,
-            ];
-            if (
-              !previousRect ||
-              position.some((n, i) => Math.abs(n - previousRect[i]) > 0.5)
-            ) {
-              previousRect = position;
-              fail("element_unstable", "Target is still moving", 409);
-            }
-          }
           break;
         } catch (error) {
           const retryable =
@@ -1164,13 +1262,26 @@ export function createAutomation({
             (error.code === "invalid_target" &&
               /found 0\b/.test(error.message));
           if (!retryable || Date.now() >= deadline) throw error;
-          if (error.code !== "element_unstable") previousRect = undefined;
-          await pause(Math.min(50, deadline - Date.now()), signal);
+          // Motion was already sampled across a frame, so retry promptly; every
+          // other retry keeps the cheaper poll interval.
+          const poll =
+            error.code === "element_unstable" && settle ? 16 : 50;
+          await pause(Math.min(poll, deadline - Date.now()), signal);
         }
       }
       checkCancelled(signal);
     }
     if (["fill", "type"].includes(type)) {
+      if (node)
+        await actionOverlay(
+          tabId,
+          showActionOverlay(rect.x + targetOffset.x, rect.y + targetOffset.y, {
+            x: rect.x + targetOffset.x - rect.width / 2,
+            y: rect.y + targetOffset.y - rect.height / 2,
+            width: rect.width,
+            height: rect.height,
+          }, "输入"),
+        );
       if (node)
         await nodeCall(tabId, node, "focus", {
           clear: type === "fill" || action.clear === true,
@@ -1219,9 +1330,21 @@ export function createAutomation({
             "(document.querySelector('main')||document.body).innerText",
           )
         : undefined;
-      if (node) await nodeCall(tabId, node, "scroll", action);
-      else {
-        const at = await point(tabId, action);
+      let elementScrolled;
+      if (node) {
+        const scrolled = await nodeCall(tabId, node, "scroll", action);
+        elementScrolled = !!scrolled?.moved;
+      } else {
+        const at = await point(
+          tabId,
+          action.screenshotId || action.x !== undefined || action.y !== undefined
+            ? action
+            : {
+                ...action,
+                x: before.viewport.width / 2,
+                y: before.viewport.height / 2,
+              },
+        );
         await cdp(tabId, "Input.dispatchMouseEvent", {
           type: "mouseWheel",
           x: at.x,
@@ -1244,17 +1367,21 @@ export function createAutomation({
           await pause(50, signal);
         } while (true);
       }
-      const after = await evaluate(tabId, metadataExpression);
+      const after = await evaluate(tabId, metadataExpression),
+        viewportMoved =
+          before.viewport.scrollY !== after.viewport.scrollY ||
+          before.viewport.scrollX !== after.viewport.scrollX;
       return {
         scrolled: true,
-        viewportMoved:
-          before.viewport.scrollY !== after.viewport.scrollY ||
-          before.viewport.scrollX !== after.viewport.scrollX,
+        viewportMoved,
+        ...(elementScrolled === undefined ? {} : { elementScrolled }),
         ...(contentChanged === undefined ? {} : { contentChanged }),
-        ...(contentChanged === false
+        // An inner container that scrolled is progress, even when the page text
+        // and the page scroll offset did not move.
+        ...(contentChanged === false && !viewportMoved && !elementScrolled
           ? {
               warning:
-                "No text change observed; the feed may be unchanged or at its end. Do not count this as new content.",
+                "No scroll or text change observed; the container may already be at its end. Do not count this as new content.",
             }
           : {}),
       };
@@ -1265,9 +1392,17 @@ export function createAutomation({
       ["click", "check"].includes(type) &&
       (!action.button || action.button === "left")
     ) {
+      const x = rect.x + (targetOffset?.x || 0),
+        y = rect.y + (targetOffset?.y || 0);
+      await actionOverlay(tabId, showActionOverlay(x, y, {
+        ...rect,
+        x: rect.x + (targetOffset?.x || 0) - rect.width / 2,
+        y: rect.y + (targetOffset?.y || 0) - rect.height / 2,
+      }, type === "check" ? (action.checked ? "勾选" : "取消勾选") : "点击"));
       if (await nodeCall(tabId, node, "click")) {
+        await actionOverlay(tabId, rippleActionOverlay(x, y), false);
         if (type === "check") {
-          const after = await nodeCall(tabId, node, "checkState");
+          const after = await readCheckedState(tabId, node, action.target);
           if (after.checked !== action.checked)
             fail(
               "checked_state_mismatch",
@@ -1292,6 +1427,22 @@ export function createAutomation({
             screenshotId: undefined,
           }
         : action,
+    );
+    await actionOverlay(
+      tabId,
+      showActionOverlay(
+        at.x,
+        at.y,
+        node
+          ? {
+              x: rect.x + offset.x - rect.width / 2,
+              y: rect.y + offset.y - rect.height / 2,
+              width: rect.width,
+              height: rect.height,
+            }
+          : undefined,
+        ({ click: "点击", double_click: "双击", hover: "悬停", move: "移动", drag: "拖动", check: action.checked ? "勾选" : "取消勾选" })[type] || "定位",
+      ),
     );
     if (type === "move" || type === "hover") {
       await cdp(tabId, "Input.dispatchMouseEvent", {
@@ -1368,8 +1519,10 @@ export function createAutomation({
         clickCount: i,
       });
     }
+    if (["click", "double_click", "check"].includes(type))
+      await actionOverlay(tabId, rippleActionOverlay(at.x, at.y), false);
     if (type === "check") {
-      const after = await nodeCall(tabId, node, "checkState");
+      const after = await readCheckedState(tabId, node, action.target);
       if (after.checked !== action.checked)
         fail(
           "checked_state_mismatch",
@@ -1457,9 +1610,18 @@ export function createAutomation({
       checkCancelled(requestSignal);
       return tabId;
     };
-    const startJob = (...args) => {
+    const startJob = (tabId, run, ...args) => {
       checkCancelled(requestSignal);
-      const job = queue.start(...args);
+      const job = queue.start(tabId, async (job, signal) => {
+        let preview;
+        try {
+          if (method === "POST" && beginTask) preview = await beginTask(tabId, signal);
+          checkCancelled(signal);
+          return await run(job, signal);
+        } finally {
+          if (preview) await endTask(preview);
+        }
+      }, ...args);
       jobOrigins.set(job.id, transport);
       job.done.finally(() => jobOrigins.delete(job.id));
       return job;
@@ -1673,6 +1835,13 @@ export function createAutomation({
                 elapsedMs: Date.now() - start,
                 ...result,
               });
+              // A hint that silently failed to render is worth one line of evidence.
+              if (overlayFailures.has(tabId)) {
+                job.results.at(-1).overlay = {
+                  displayFailed: overlayFailures.get(tabId),
+                };
+                overlayFailures.delete(tabId);
+              }
               job.currentAction = undefined;
             }
             checkCancelled(signal);
@@ -1718,6 +1887,7 @@ export function createAutomation({
     request,
     observe,
     screenshot,
+    dismissOverlay,
     invalidate,
     activeTasks: queue.active,
     sessions,
@@ -1744,6 +1914,8 @@ export function createAutomation({
       invalidate(tabId);
       sessions.forget(tabId);
       children.delete(tabId);
+      overlayDrawnAt.delete(tabId);
+      overlayFailures.delete(tabId);
       queue.cancelTab(tabId);
     },
   };

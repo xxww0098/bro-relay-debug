@@ -97,6 +97,7 @@ export function createTaskQueue({ limit = 100 } = {}) {
       .then(async () => {
         let timer;
         try {
+          if (job.cancelReason) throw new TaskError(job.cancelReason, "Task cancelled", 409);
           checkCancelled(job.controller.signal);
           job.status = "running";
           job.startedAt = Date.now();
@@ -109,7 +110,7 @@ export function createTaskQueue({ limit = 100 } = {}) {
           job.observation = observation;
           job.status = "completed";
         } catch (error) {
-          job.status = job.controller.signal.aborted ? "cancelled" : "failed";
+          job.status = job.cancelReason || job.controller.signal.aborted ? "cancelled" : "failed";
           job.error = {
             code: job.timedOut
               ? "task_timeout"
@@ -158,14 +159,17 @@ export function createTaskQueue({ limit = 100 } = {}) {
     }
     return { ...publicJob(job), cancellationRequested: !job.finishedAt };
   }
+  function cancelJobs(pending, reason = "task_cancelled") {
+    // Aborting can reenter the queue. Fence every selected job before callbacks run.
+    for (const job of pending) job.cancelReason = reason;
+    for (const job of pending) job.controller.abort();
+    return pending.length;
+  }
   function cancelTab(tabId, reason = "task_cancelled") {
-    for (const job of jobs.values())
-      if (job.tabId === tabId && !job.finishedAt) cancel(job.id, reason);
+    cancelJobs([...jobs.values()].filter(job => job.tabId === tabId && !job.finishedAt), reason);
   }
   function cancelSession(sessionId, reason = "session_stopped") {
-    for (const job of jobs.values())
-      if (job.sessionId === sessionId && !job.finishedAt)
-        cancel(job.id, reason);
+    cancelJobs([...jobs.values()].filter(job => job.sessionId === sessionId && !job.finishedAt), reason);
   }
   const active = () =>
     [...jobs.values()]
@@ -177,10 +181,6 @@ export function createTaskQueue({ limit = 100 } = {}) {
         status: j.status,
         completedActions: j.results.length,
       }));
-  const cancelAll = () => {
-    const pending = active();
-    for (const job of pending) cancel(job.id);
-    return pending.length;
-  };
+  const cancelAll = () => cancelJobs([...jobs.values()].filter(job => !job.finishedAt));
   return { start, get, cancel, cancelTab, cancelSession, active, cancelAll };
 }
