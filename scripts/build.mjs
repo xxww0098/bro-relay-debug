@@ -41,14 +41,17 @@ export async function build(root = fileURLToPath(new URL('../', import.meta.url)
   await buildSkill(root);
   const dist = join(root, 'dist');
   await mkdir(dist, { recursive: true });
+  const staged = join(dist, 'bro-relay-debug-extension');
+  await rm(staged, { recursive: true, force: true });
   await rm(join(dist, 'extension'), { recursive: true, force: true });
-  await cp(join(root, 'extension'), join(dist, 'extension'), { recursive: true });
-  await cp(join(root, 'LICENSE'), join(dist, 'extension/LICENSE'));
-  await cp(join(root, 'THIRD_PARTY_NOTICES.md'), join(dist, 'extension/THIRD_PARTY_NOTICES.md'));
+  await cp(join(root, 'extension'), staged, { recursive: true });
+  await cp(join(root, 'LICENSE'), join(staged, 'LICENSE'));
+  await cp(join(root, 'THIRD_PARTY_NOTICES.md'), join(staged, 'THIRD_PARTY_NOTICES.md'));
+  // Version only in the zip name; the inner folder stays fixed so users can overwrite-install.
   const archive = join(dist, `bro-relay-debug-extension-${version}.zip`);
   await rm(archive, { force: true });
-  execFileSync('zip', ['-qr', archive, '.'], { cwd: join(dist, 'extension') });
-  return { version, hub, extension: join(dist, 'extension'), archive };
+  execFileSync('zip', ['-qr', archive, 'bro-relay-debug-extension'], { cwd: dist });
+  return { version, hub, extension: staged, archive };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

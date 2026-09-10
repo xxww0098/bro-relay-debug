@@ -107,8 +107,10 @@ npm run skill:install
 
 ### 6. 安装扩展并验证完整链路
 
-将 `dist/bro-relay-debug-extension-<版本号>.zip` 交给用户，解压后在
-`chrome://extensions` 或 `edge://extensions` 开启开发者模式，选择“加载解压缩的扩展”。
+将 `dist/bro-relay-debug-extension-<版本号>.zip` 交给用户。版本号只出现在压缩包
+文件名里，解压后得到固定名为 `bro-relay-debug-extension` 的目录，后续升级直接
+用新压缩包覆盖该目录即可。在 `chrome://extensions` 或 `edge://extensions` 开启
+开发者模式，选择“加载解压缩的扩展”并指向该目录。
 打开扩展的滑动开关，等待“已连接”，复制驱动 ID 提供给装有
 [bro-connect](skills/bro-connect/SKILL.md) 的代理。
 
@@ -143,7 +145,7 @@ CLI 已随 `skills/bro-connect/scripts/runtime` 内置；代理电脑只需 Node
 
 仅更新 Hub 代码且地址不变时，重新执行第 3 步的部署命令即可。
 如果改变 Hub 域名，需要重新构建、分发扩展，并更新代理端 CLI；
-用户覆盖原解压目录后，在扩展管理页点击重新加载。
+用户用新压缩包覆盖原 `bro-relay-debug-extension` 解压目录后，在扩展管理页点击重新加载。
 
 查看 Hub 的实时日志：
 
