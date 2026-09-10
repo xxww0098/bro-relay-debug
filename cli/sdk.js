@@ -94,10 +94,10 @@ export function createBrowser(connection, options = {}) {
   }
   async function connect(signal, timeoutMs) {
     if (closed) throw new RelayError({ code: 'session_closed', message: 'Browser session is closed' });
-    if (opening) return opening;
+    signal = AbortSignal.any([signal, lifetime.signal]);
+    if (opening) return abortable(opening, signal);
     if (session && Date.now() >= session.expires) { session.close(); session = undefined; }
     if (session) return session;
-    signal = AbortSignal.any([signal, lifetime.signal]);
     opening = (async () => {
       const client = await createClient(pairing);
       const challenge = await exchange(randomUUID(), { type: 'session.hello', hello: client.hello }, signal, timeoutMs);

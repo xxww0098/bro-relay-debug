@@ -79,6 +79,33 @@ test('concurrent first requests await the authenticated finish acknowledgement',
   } finally { release(); await browser.close(); hub.device.close(); }
 });
 
+test('joining callers can cancel without aborting or retiring the shared handshake', async () => {
+  const hub = await endpoint();
+  let release, reached;
+  const waiting = new Promise(resolve => { reached = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const browser = createBrowser(hub.connection, { fetch: async (url, options) => {
+    const response = await hub.fetch(url, options);
+    if (JSON.parse(options.body).payload.type === 'session.finish') { reached(); await gate; }
+    return response;
+  } });
+  try {
+    const first = browser.tabs(); await waiting;
+    const controller = new AbortController();
+    const second = browser.request('GET', '/api/tabs', undefined, { signal: controller.signal });
+    const rejected = assert.rejects(second, { name: 'AbortError' });
+    controller.abort();
+    await Promise.race([rejected, new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('Joining caller did not cancel promptly')), 1000);
+      rejected.finally(() => clearTimeout(timer)).catch(() => {});
+    })]);
+    assert.equal(hub.closes, 0); assert.equal(hub.commands.length, 0);
+    release(); assert.equal((await first).ok, true);
+    assert.equal((await browser.tabs()).ok, true);
+    assert.equal(hub.frames.filter(frame => frame.payload.type === 'session.hello').length, 1);
+  } finally { release(); await browser.close(); hub.device.close(); }
+});
+
 test('screenshots and structured action failures are authenticated', async () => {
   const hub = await endpoint(command => command.path === '/api/screenshot'
     ? { status: 200, body: { ok: true, data: 'aGVsbG8=' } }
