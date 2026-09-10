@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bro Relay Debug</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main>
+    <header><span class="brand-mark" aria-hidden="true">B</span><h1>Bro Relay Debug</h1></header>
+    <section class="control-row" aria-label="连接控制">
+      <div><label for="remoteToggle">远程控制</label><p id="remoteState">关闭</p></div>
+      <input id="remoteToggle" class="switch" type="checkbox" role="switch" aria-label="启用远程控制">
+    </section>
+    <section id="remoteDetails" hidden>
+      <div class="id-heading"><label for="remoteDeviceId">驱动 ID</label><span>点击复制</span></div>
+      <textarea id="remoteDeviceId" rows="2" readonly spellcheck="false" aria-describedby="idHint"></textarea>
+      <p id="idHint" class="hint">将 ID 发给代理，即可连接此浏览器。</p>
+      <button id="regenerateDevice" type="button">重新生成驱动 ID</button>
+      <p class="hint">重新生成后，旧 ID 立即失效。</p>
+    </section>
+    <p id="remoteStatus" class="status" role="status" aria-live="polite">启用后，将显示驱动 ID。</p>
+  </main>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "bro-relay-debug",
+  "version": "0.1.0",
+  "description": "Remote browser debugging through a driver ID, without a local daemon",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22.16.0" },
+  "bin": { "bro-relay-debug": "cli/index.js" },
+  "exports": { ".": "./cli/sdk.js" },
+  "files": ["cli/", "config.js", "extension/", "hub/", "skills/", "scripts/build.mjs", "scripts/install-skill.mjs", ".env.example", "LICENSE", "THIRD_PARTY_NOTICES.md", "README.md"],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:browser": "node scripts/browser-test.mjs",
+    "skill:install": "node scripts/install-skill.mjs",
+    "prepack": "npm run build"
+  },
+  "devDependencies": { "playwright": "^1.58.0", "ws": "^8.21.0" }
+}

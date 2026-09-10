@@ -1,0 +1,10 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Bro Relay fixture</title>
+<h1>Remote fixture</h1>
+<label>Message <input id="message" value="hello"></label>
+<button id="apply">Apply</button>
+<p id="result">Waiting</p>
+<script>
+  apply.onclick = () => { result.textContent = `Applied: ${message.value}` }
+</script>
