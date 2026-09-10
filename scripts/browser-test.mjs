@@ -263,39 +263,23 @@ try {
   const partialCoordinate = await cliResult(['actions', '--file', partialCoordinateFile, '--tab', tab.id])
   assert.notEqual(partialCoordinate.code, 0, 'scroll with only one coordinate should fail')
   assert.match(partialCoordinate.stderr, /invalid_coordinates|x and y/i)
-  // Users interact only with pixels in the preview; the agent still targets the source.
+  // The agent operates the current tab in place: no preview tab may open.
   await page.goto(pageUrl)
   await page.bringToFront()
   const nativeSource = await worker.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url), pageUrl)
-  const getNativeSource = () => worker.evaluate(id => chrome.tabs.get(id), nativeSource.id)
   await page.evaluate(() => { window.lastApplyTrusted = null; document.querySelector('#apply').addEventListener('click', event => { window.lastApplyTrusted = event.isTrusted }) })
-  const previewTask = await second.request('POST', '/api/actions', { tabId: tab.id, async: true,
+  const inPlace = await second.request('POST', '/api/actions', { tabId: tab.id, async: true,
     actions: [{ type: 'wait', target: '#allow-agent', timeoutMs: 10000 },
-      { type: 'fill', target: '#message', text: 'background work' }, { type: 'key', key: 'Backspace' },
+      { type: 'fill', target: '#message', text: 'in-place work' }, { type: 'key', key: 'Backspace' },
       { type: 'type', text: 'k verified' }, { type: 'click', target: '#apply' },
       { type: 'wait', target: '#finish-agent', timeoutMs: 10000 }], observe: 'none' })
-  const previewPage = await waitFor(async () => context.pages().find(p => p.url().startsWith(`chrome-extension://${extensionId}/preview.html?`)))
-  await waitFor(() => previewPage.locator('#previewImage').evaluate(img => img.naturalWidth > 0))
-  assert.equal((await getNativeSource()).active, false, 'source must run in background')
-  const originalValue = await page.locator('#message').inputValue()
-  const originalResult = await page.locator('#result').textContent()
-  const originalScroll = await page.evaluate(() => scrollY)
-  await previewPage.locator('#previewImage').click()
-  await previewPage.keyboard.type('human input')
-  await previewPage.mouse.wheel(0, 400)
-  assert.equal(await page.locator('#message').inputValue(), originalValue)
-  assert.equal(await page.locator('#result').textContent(), originalResult)
-  assert.equal(await page.evaluate(() => scrollY), originalScroll, 'preview scrolling must not scroll the source')
-  await previewPage.screenshot({ path: join(artifacts, 'readonly-preview.png') })
-  await previewPage.locator('header').screenshot({ path: join(artifacts, 'readonly-preview-header.png') })
   await page.evaluate(() => { const marker = document.createElement('div'); marker.id = 'allow-agent'; marker.textContent = 'ready'; document.body.prepend(marker) })
-  await waitFor(async () => (await page.locator('#result').textContent()) === 'Applied: background work verified')
-  assert.equal((await getNativeSource()).active, false, 'agent clicks must keep the source in background')
-  assert.equal(await page.evaluate(() => window.lastApplyTrusted), true, 'background clicks must retain native event semantics')
+  await waitFor(async () => (await page.locator('#result').textContent()) === 'Applied: in-place work verified')
+  assert.equal(await page.evaluate(() => window.lastApplyTrusted), true, 'in-place clicks must retain native event semantics')
   await page.evaluate(() => { const marker = document.createElement('div'); marker.id = 'finish-agent'; marker.textContent = 'done'; document.body.prepend(marker) })
-  await waitFor(() => previewPage.isClosed())
-  assert.equal((await getNativeSource()).active, true, 'completion must return to the source')
-  assert.equal((await second.request('GET', `/api/tasks/${previewTask.task.id}`)).task.status, 'completed')
+  await waitFor(async () => (await second.request('GET', `/api/tasks/${inPlace.task.id}`)).task.status === 'completed')
+  assert.equal((await worker.evaluate(id => chrome.tabs.get(id), nativeSource.id)).active, true, 'agent work must stay in the current tab')
+  assert.ok(!context.pages().some(p => p.url().startsWith(`chrome-extension://${extensionId}/preview.html`)), 'no preview tab may open')
 
   const pending = await second.request('POST', '/api/actions', { tabId: tab.id, async: true,
     actions: [{ type: 'wait', target: '#never-created', timeoutMs: 10000 }, { type: 'click', target: '#apply' }], observe: 'none' })
@@ -305,29 +289,24 @@ try {
   await page.locator('#message').fill('must-not-apply-after-stop')
   const beforeStop = await page.locator('#result').textContent()
   await popup.setViewportSize({ width: 352, height: 600 })
-  await popup.screenshot({ path: join(artifacts, 'takeover-stop.png'), mask: [popup.locator('#remoteDeviceId')] })
-  const stopPreview = await waitFor(async () => context.pages().find(p => p.url().startsWith(`chrome-extension://${extensionId}/preview.html?`)))
-  await stopPreview.getByRole('button', { name: '停止并接管', exact: true }).click()
-  await waitFor(() => stopPreview.isClosed())
-  assert.equal((await getNativeSource()).active, true, 'stopping must return to the source')
+  await popup.locator('#remoteToggle').uncheck()
   await waitFor(async () => (await popup.locator('#remoteState').textContent()) === '关闭')
-  assert.equal(await popup.locator('#stopTakeover').isVisible(), false)
   assert.equal(await popup.locator('#remoteDeviceId').inputValue(), secondId, 'stopping must retain the driver ID')
+  assert.equal(await page.locator('#result').textContent(), beforeStop, 'cancelled clicks must not run')
   await popup.locator('#remoteToggle').check()
   await waitFor(async () => /已连接/.test(await popup.locator('#remoteState').textContent()))
   for (const job of [pending, queued]) {
     const result = await second.request('GET', `/api/tasks/${job.task.id}`)
     assert.equal(result.task.status, 'cancelled', `stop must cancel running and queued work: ${JSON.stringify(result.task)}`)
   }
-  assert.equal(await page.locator('#result').textContent(), beforeStop, 'cancelled clicks must not run')
   const disconnectedTask = await second.request('POST', '/api/actions', { tabId: tab.id, async: true,
     actions: [{ type: 'wait', target: '#never-created', timeoutMs: 10000 }], observe: 'none' })
-  const disconnectedPreview = await waitFor(async () => context.pages().find(p => p.url().startsWith(`chrome-extension://${extensionId}/preview.html?`)))
   hub.disconnect()
-  await waitFor(() => disconnectedPreview.isClosed())
-  assert.equal((await getNativeSource()).active, true, 'disconnect must return to the source')
+  await waitFor(async () => {
+    try { return (await second.request('GET', `/api/tasks/${disconnectedTask.task.id}`)).task.status === 'cancelled' }
+    catch { return false }
+  })
   await waitFor(async () => /已连接/.test(await popup.locator('#remoteState').textContent()))
-  assert.equal((await second.request('GET', `/api/tasks/${disconnectedTask.task.id}`)).task.status, 'cancelled')
   await rm(cliRoot, { recursive: true, force: true })
   console.log(`browser e2e passed; screenshots: ${artifacts}`)
 } finally {

@@ -134,11 +134,6 @@ export function createAutomation({
   closeTab,
   listTabs,
   focusTab,
-  beginTask,
-  endTask,
-  endPreview,
-  onPointer,
-  onViewport,
   runtimeInfo = () => ({}),
   publicTabId = (id) => id,
 }) {
@@ -1104,19 +1099,17 @@ export function createAutomation({
   }
   async function actionOverlay(tabId, spec, preserveCancellation = true) {
     const payload = typeof spec === "string" ? { expression: spec } : spec;
-    if (payload.pointer) onPointer?.(tabId, payload.pointer);
     try {
       const result = await evaluate(tabId, payload.expression);
       overlayDrawnAt.set(tabId, Date.now());
       if (result && result.ok === false) overlayFailures.set(tabId, result.error);
-      if (result?.viewport) onViewport?.(tabId, result.viewport);
     } catch (error) {
       if (preserveCancellation && error?.code === "task_cancelled") throw error;
     }
   }
-  // The hint exists for the operator watching the browser; it must never land in
-  // the pixels handed back as evidence. Preview draws its own cursor, so a
-  // screenshot dismiss must not clear that pointer.
+  // The hint exists for the operator watching the page; it outlives the batch via
+  // its own idle timer and is dismissed before screenshots so it never lands in
+  // the pixels handed back as evidence.
   async function dismissOverlay(tabId, { force = false } = {}) {
     if (!force && Date.now() - (overlayDrawnAt.get(tabId) || 0) > OVERLAY_LIFETIME_MS.max + 250)
       return;
@@ -1498,7 +1491,6 @@ export function createAutomation({
               button: "left",
               buttons: 1,
             });
-            onPointer?.(tabId, { x: current.x, y: current.y, kind: "drag", label: "拖动" });
           }
         }
       } finally {
@@ -1621,16 +1613,8 @@ export function createAutomation({
     const startJob = (tabId, run, ...args) => {
       checkCancelled(requestSignal);
       const job = queue.start(tabId, async (job, signal) => {
-        let preview;
-        try {
-          if (method === "POST" && beginTask) preview = await beginTask(tabId, signal);
-          checkCancelled(signal);
-          return await run(job, signal);
-        } finally {
-          onPointer?.(tabId, null);
-          await dismissOverlay(tabId, { force: true });
-          if (preview) await endTask(preview);
-        }
+        checkCancelled(signal);
+        return await run(job, signal);
       }, ...args);
       jobOrigins.set(job.id, transport);
       job.done.finally(() => jobOrigins.delete(job.id));
@@ -1773,9 +1757,7 @@ export function createAutomation({
     }
     if (p === "/api/release" && method === "POST") {
       const tabId = await resolve(body.tabId);
-      onPointer?.(tabId, null);
       await dismissOverlay(tabId, { force: true });
-      await endPreview?.(tabId);
       return { ok: true, released: true, tabId: publicTabId(tabId) };
     }
     if (p === "/api/observe" || p === "/api/read") {

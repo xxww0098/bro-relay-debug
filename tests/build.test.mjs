@@ -32,10 +32,10 @@ test('build.sh loads env from its directory and emits a versioned configured ZIP
       const result = JSON.parse(execFileSync('bash', [join(root, 'build.sh')], { cwd: tmpdir(), env, encoding: 'utf8' }));
       assert.equal(result.hub, hub);
       assert.equal(result.archive, join(root, 'dist/bro-relay-debug-extension-9.8.7.zip'));
-      const manifest = JSON.parse(execFileSync('unzip', ['-p', result.archive, 'manifest.json']));
+      const manifest = JSON.parse(execFileSync('unzip', ['-p', result.archive, 'bro-relay-debug-extension/manifest.json']));
       assert.equal(manifest.version, '9.8.7');
       assert.deepEqual(manifest.host_permissions, [`${hub}/*`]);
-      assert.ok(execFileSync('unzip', ['-p', result.archive, 'config.js'], { encoding: 'utf8' }).includes(hub));
+      assert.ok(execFileSync('unzip', ['-p', result.archive, 'bro-relay-debug-extension/config.js'], { encoding: 'utf8' }).includes(hub));
     }
   } finally { await rm(root, { recursive: true, force: true }); }
 });

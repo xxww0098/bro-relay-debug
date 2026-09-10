@@ -5,6 +5,19 @@ export async function createMockHub() {
   const routes = new Map()
   const wss = new WebSocketServer({ noServer: true })
   const server = http.createServer(async (req, res) => {
+    if (req.method === 'GET' && req.url.startsWith('/v1/status/')) {
+      const routeId = decodeURIComponent(req.url.slice('/v1/status/'.length).split('?')[0])
+      const auth = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+      const route = routes.get(routeId)
+      if (!route || route.socket.readyState !== 1 || auth !== route.secret) {
+        res.writeHead(409, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, code: 'remote_device_offline', message: 'offline', status: 409 })); return
+      }
+      const now = new Date().toISOString()
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, routeId, connected: true, connectedAt: now, lastSeen: now, hello: route.hello ?? null }))
+      return
+    }
     if (req.method !== 'POST' || req.url !== '/v1/rpc') {
       res.writeHead(404).end(); return
     }
@@ -42,6 +55,9 @@ export async function createMockHub() {
           if (previous?.socket && previous.socket !== ws) previous.socket.close()
           routes.set(routeId, route)
           ws.send(JSON.stringify({ type: 'device.authenticated' }))
+        } else if (msg.type === 'device.hello') {
+          const { type, ...hello } = msg
+          if (route) route.hello = hello
         } else if (msg.type === 'rpc.response') route?.pending.get(msg.id)?.(msg)
       })
       ws.on('close', () => { if (routes.get(routeId) === route) routes.delete(routeId) })

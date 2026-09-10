@@ -27,7 +27,7 @@ If already connected, use `status` to check the connection before asking again.
 Use `tabs` to identify the requested page by its actual title/URL, then use its
 returned ID with `--tab`. When several tabs could match, ask which one the user
 means. Never guess a tab ID or silently act on the active tab. Keep using the
-source page ID during a task, including while a preview is visible. Do not switch
+source page ID during a task. Do not switch
 to a different browser tool: it may control another browser or login session.
 
 ## Work on the page
@@ -57,26 +57,26 @@ to a different browser tool: it may control another browser or login session.
   mutations only within the user's requested task; do not send messages or
   submit purchases merely to test the connection.
 
-## User takeover and result verification
+## Result verification
 
-Action batches and `eval` temporarily show a read-only screenshot preview while
-the source page runs in the background. The pointer is drawn on that preview, not
-in screenshot pixels. Even a read-only `eval` can trigger this preview; prefer
-`read` or `observe` when they suffice. Do not click, type into, or navigate the
-preview.
+Action batches and `eval` run in the page itself: the pointer, target box, and
+action label are drawn on the live page and dismissed before screenshots, so
+evidence pixels stay clean. Even a read-only `eval` can draw this hint; prefer
+`read` or `observe` when they suffice. The user may be watching the page while
+you work; treat their visible tab as shared state.
 
 When the requested work is finished — success, failure, or you are stopping —
 run `release --tab TAB_ID` on the same source page ID you have been using. That
-dismisses the pointer and closes the preview. The operator must see the source
-page without a cursor before you treat the remote task as done. `disconnect`
+dismisses the pointer overlay. The operator must see the source page without a
+cursor before you treat the remote task as done. `disconnect`
 only forgets the local credential; it does not end control on the browser.
 
 Completion of an action batch is not the same as ending control. An overlay
 animation, an accepted job, or a successful connection is not task completion.
 
-“停止并接管” cancels running/queued control tasks and disables remote control.
-Treat that as the user taking over; do not automatically re-enable control or
-resume cancelled work. Completed actions are not rolled back.
+Turning off “远程控制” in the extension popup cancels running/queued control
+tasks. Treat that as the user taking over; do not automatically re-enable
+control or resume cancelled work. Completed actions are not rolled back.
 
 Verify the requested outcome from fresh page state (for example a saved value,
 confirmation, or resulting URL). Report what succeeded, any partial/uncertain

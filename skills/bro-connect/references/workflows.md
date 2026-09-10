@@ -75,7 +75,7 @@ After the last authorized action, and before you report the remote task done:
 node /path/to/bro-connect/scripts/bro.mjs release --tab TAB_ID
 ```
 
-That dismisses the pointer and closes the preview. `disconnect` only removes the
+That dismisses the on-page pointer overlay. `disconnect` only removes the
 local credential; it does not end control on the browser.
 
 ## Debugging scripts

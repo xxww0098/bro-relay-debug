@@ -37,13 +37,7 @@ const __countSend = (target, method, params) => { __cdpStats.total++; __cdpStats
 const __tabsStats = globalThis.__tabsStats = { query: 0 };
 const __countTabsQuery = (query) => { __tabsStats.query++; return chrome.tabs.query(query); };
 ` + background.replaceAll('chrome.debugger.sendCommand(', '__countSend(').replaceAll('chrome.tabs.query(', '__countTabsQuery(')
-// BENCH_NO_TAKEOVER isolates the command path from the preview-tab feature, which
-// opens its own tab and screenshot around every POST task.
-const noTakeover = process.env.BENCH_NO_TAKEOVER === '1'
-const isolated = instrumented.replace('beginTask: takeover.enter', 'beginTask: undefined').replace('endTask: takeover.leave', 'endTask: undefined')
-if (noTakeover && isolated === instrumented) console.log('BENCH_NO_TAKEOVER=1 had no effect: the preview hook was renamed')
-else if (noTakeover) console.log('BENCH_NO_TAKEOVER=1: takeover preview disabled for this run')
-await writeFile(backgroundPath, noTakeover ? isolated : instrumented)
+await writeFile(backgroundPath, instrumented)
 await writeFile(join(extension, 'config.js'), `export const HUB_URL = ${JSON.stringify(hub.url)}\n`)
 const manifestPath = join(extension, 'manifest.json')
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))

@@ -1,23 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createAutomation } from '../extension/automation.js';
+import { ACTION_OVERLAY_SELECTOR } from '../extension/action-overlay.js';
 
-test('POST /api/release dismisses the pointer without opening a preview', async () => {
-  const pointers = [];
-  const previewed = [];
-  const ended = [];
+test('POST /api/release force-dismisses the on-page pointer overlay', async () => {
+  const sent = [];
   const executor = createAutomation({
     resolveTab: async () => 11,
-    beginTask: async (tabId) => { previewed.push(tabId); return { id: 'lease' }; },
-    endTask: async () => {},
-    endPreview: async (tabId) => { ended.push(tabId); },
-    onPointer: (tabId, pointer) => pointers.push([tabId, pointer]),
-    send: async () => ({ result: { value: { ok: true, dismissed: true } } }),
+    send: async (tabId, method, params) => {
+      sent.push([tabId, method, params]);
+      return { result: { value: { ok: true, dismissed: true } } };
+    },
   });
   const result = await executor.request('POST', '/api/release', { tabId: 't_example123' }, 'remote');
   assert.equal(result.ok, true);
   assert.equal(result.released, true);
-  assert.deepEqual(previewed, []);
-  assert.deepEqual(ended, [11]);
-  assert.deepEqual(pointers.at(-1), [11, null]);
+  const dismiss = sent.find(([, , params]) =>
+    String(params?.expression).includes(ACTION_OVERLAY_SELECTOR) &&
+    String(params.expression).includes('dismiss'));
+  assert.ok(dismiss, 'release must dismiss the overlay on the page');
 });

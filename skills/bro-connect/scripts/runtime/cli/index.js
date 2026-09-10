@@ -15,7 +15,7 @@ const usage = `bro-relay-debug <command> [--tab ID]
 connect <driver-id> | connect --stdin  Verify and save a connection
 status | doctor                      Check saved connection and capabilities
 disconnect                           Remove the local saved credential
-release                              Dismiss the pointer and close the control preview
+release                              Dismiss the on-page pointer overlay
 tabs                                 List controllable pages
 tabs new URL | tabs close | tabs focus
 state | read | observe [--diff] [--cursor CURSOR]
