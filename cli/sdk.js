@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { validateHub } from '../extension/hub-url.js';
 import { isTaskRequest } from '../extension/protocol.js';
-import { parsePairing, deriveHubToken, createClient } from '../extension/relay-crypto.js';
+import { parsePairing, deriveHubToken, createClient, LIMITS } from '../extension/relay-crypto.js';
 
 export function parseDriverId(value) {
   const driverId = String(value || '').trim();
@@ -31,10 +31,35 @@ function credentials(connection, options) {
   return pairing;
 }
 
-async function responseJson(response) {
-  let data;
-  try { data = await response.json(); }
-  catch { throw new RelayError({ code: 'invalid_response', message: 'Hub returned an invalid response', status: response.status }); }
+async function abortable(promise, signal) {
+  if (signal.aborted) { promise.catch(() => {}); signal.throwIfAborted(); }
+  let abort;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+    })]);
+  } finally { signal.removeEventListener('abort', abort); }
+}
+
+async function responseJson(response, signal, limit = Math.ceil((LIMITS.responseBytes + 16) * 4 / 3) + 4096) {
+  const reader = response.body?.getReader();
+  let data, size = 0;
+  const chunks = [];
+  try {
+    if (!reader) throw new Error('Missing response body');
+    while (true) {
+      const { done, value } = await abortable(reader.read(), signal);
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) throw new RelayError({ code: 'response_too_large', message: 'Hub response exceeds the byte limit' });
+      chunks.push(value);
+    }
+    data = JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
+  } catch (error) {
+    if (error instanceof RelayError || signal.aborted) throw error;
+    throw new RelayError({ code: 'invalid_response', message: 'Hub returned an invalid response', status: response.status });
+  } finally { reader?.cancel().catch(() => {}); }
   if (!response.ok || data?.ok !== true) {
     // Hub errors describe transport only and cannot authenticate browser outcomes.
     throw new RelayError({ code: 'transport_error', message: 'Hub transport request failed', status: response.status,
@@ -47,14 +72,15 @@ export function createBrowser(connection, options = {}) {
   const pairing = credentials(connection, options);
   const fetchImpl = options.fetch ?? globalThis.fetch;
   let token, session, opening, closed = false;
+  const lifetime = new AbortController();
   async function exchange(id, payload, signal, timeoutMs) {
     token ??= await deriveHubToken(pairing);
-    const response = await fetchImpl(`${pairing.origin}/v1/rpc`, {
+    const response = await abortable(fetchImpl(`${pairing.origin}/v1/rpc`, {
       method: 'POST', redirect: 'error',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, routeId: pairing.route, timeoutMs, payload }), signal,
-    });
-    return (await responseJson(response)).payload;
+    }), signal);
+    return (await responseJson(response, signal)).payload;
   }
   async function openResult(current, id, result) {
     if (result?.type !== 'rpc.result') throw new RelayError({ code: 'invalid_response', message: 'Expected an encrypted browser response' });
@@ -68,24 +94,31 @@ export function createBrowser(connection, options = {}) {
   }
   async function connect(signal, timeoutMs) {
     if (closed) throw new RelayError({ code: 'session_closed', message: 'Browser session is closed' });
-    opening ??= (async () => {
+    if (opening) return opening;
+    if (session && Date.now() >= session.expires) { session.close(); session = undefined; }
+    if (session) return session;
+    signal = AbortSignal.any([signal, lifetime.signal]);
+    opening = (async () => {
       const client = await createClient(pairing);
       const challenge = await exchange(randomUUID(), { type: 'session.hello', hello: client.hello }, signal, timeoutMs);
       if (challenge?.type !== 'session.challenge') throw new RelayError({ code: 'authentication_failed', message: 'Expected an authenticated device challenge' });
       const established = await client.finish(challenge.challenge);
       // Keep the session for close even if the finish acknowledgement is lost.
       session = established.session;
+      signal.throwIfAborted();
       const id = randomUUID();
       const result = await openResult(session, id, await exchange(id, { type: 'session.finish', finish: established.finish }, signal, timeoutMs));
       if (result.status !== 200 || result.body.ok !== true) throw new RelayError({ code: 'authentication_failed', message: 'Device refused the session' });
       return session;
     })();
     try { return await opening; }
-    catch (error) { closed = true; throw error; }
+    catch (error) { await retire(session); throw error; }
+    finally { opening = undefined; }
   }
   async function request(method, path, body, { signal, timeoutMs = 35000 } = {}) {
     if (signal?.aborted) throw new RelayError({ code: 'request_cancelled', message: 'Request cancelled before dispatch', status: 409, retryable: false });
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('Expected a positive timeoutMs');
+    timeoutMs = Math.min(timeoutMs, 35000);
     const query = new URL(path, 'http://relay.local');
     if (!path.startsWith('/api/') || !['GET', 'POST'].includes(method)) throw new Error('Expected GET or POST and an /api/ path');
     const tracked = isTaskRequest(method, query.pathname);
@@ -98,16 +131,17 @@ export function createBrowser(connection, options = {}) {
     const controller = new AbortController();
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true });
+    const requestSignal = AbortSignal.any([controller.signal, lifetime.signal]);
     const timer = setTimeout(abort, timeoutMs);
-    let dispatched = false, authenticated = false;
+    let current, dispatched = false, authenticated = false;
     try {
-      const current = await connect(controller.signal, Math.min(timeoutMs, 30000));
-      if (controller.signal.aborted) throw new RelayError({ code: 'request_cancelled', message: 'Request cancelled before dispatch', status: 409 });
+      current = await connect(requestSignal, Math.min(timeoutMs, 30000));
+      if (requestSignal.aborted) throw new RelayError({ code: 'request_cancelled', message: 'Request cancelled before dispatch', status: 409 });
       const id = randomUUID();
       const envelope = await current.seal(id, { kind: 'rpc', method, path, body: body ?? null, deadline: Date.now() + Math.min(timeoutMs, 30000) });
-      if (controller.signal.aborted) throw new RelayError({ code: 'request_cancelled', message: 'Request cancelled before dispatch', status: 409 });
+      if (requestSignal.aborted) throw new RelayError({ code: 'request_cancelled', message: 'Request cancelled before dispatch', status: 409 });
       dispatched = true;
-      const result = await openResult(current, id, await exchange(id, { type: 'rpc', envelope }, controller.signal, Math.min(timeoutMs, 30000)));
+      const result = await openResult(current, id, await exchange(id, { type: 'rpc', envelope }, requestSignal, Math.min(timeoutMs, 30000)));
       authenticated = true;
       if (result.status >= 400 || result.body.ok === false) throw new RelayError({ ...result.body, status: result.status });
       return result.body;
@@ -131,13 +165,12 @@ export function createBrowser(connection, options = {}) {
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
+      if (!authenticated) await retire(current);
     }
   }
-  async function close() {
-    closed = true;
-    try { await opening; } catch { /* Close a possibly established session below. */ }
-    if (!session) return;
-    const current = session; session = undefined;
+  async function retire(current) {
+    if (!current || session !== current) return;
+    session = undefined;
     try {
       const id = randomUUID();
       const envelope = await current.seal(id, { kind: 'close' });
@@ -145,17 +178,24 @@ export function createBrowser(connection, options = {}) {
     } catch { /* Best effort cleanup; never mask the command result. */ }
     finally { current.close(); }
   }
+  async function close() {
+    closed = true;
+    lifetime.abort();
+    try { await opening; } catch { /* Failed handshakes already retire their session. */ }
+    await retire(session);
+  }
   return { request, close, capabilities: () => request('GET', '/api/capabilities'), tabs: () => request('GET', '/api/tabs') };
 }
 
 export async function status(connection, options = {}) {
   const pairing = credentials(connection, options);
   const token = await deriveHubToken(pairing);
-  const response = await (options.fetch ?? globalThis.fetch)(`${pairing.origin}/v1/status/${pairing.route}`, {
+  const signal = AbortSignal.timeout(Math.min(options.timeoutMs ?? 10000, 35000));
+  const response = await abortable((options.fetch ?? globalThis.fetch)(`${pairing.origin}/v1/status/${pairing.route}`, {
     redirect: 'error', headers: { Authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(options.timeoutMs ?? 10000),
-  });
-  const data = await responseJson(response);
+    signal,
+  }), signal);
+  const data = await responseJson(response, signal, 4096);
   return { ok: true, transportOnly: true, connected: data.connected === true, lastSeen: data.lastSeen ?? null };
 }
 

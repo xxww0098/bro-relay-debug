@@ -11,7 +11,8 @@ import { filterNodes } from '../cli/index.js';
 
 async function endpoint(handler = () => ({ status: 200, body: { ok: true } })) {
   const pairingId = await createPairing('http://127.0.0.1:9');
-  const pairing = parsePairing(pairingId), device = await createDevice(pairing);
+  const pairing = parsePairing(pairingId);
+  let device = await createDevice(pairing);
   const frames = [], commands = [];
   let closes = 0;
   const fetch = async (url, options) => {
@@ -39,7 +40,7 @@ async function endpoint(handler = () => ({ status: 200, body: { ok: true } })) {
     }
     return Response.json({ ok: true, payload });
   };
-  return { pairing, device, frames, commands, fetch, connection: parseDriverId(pairingId), get closes() { return closes; } };
+  return { pairing, get device() { return device; }, async restart() { device.close(); device = await createDevice(pairing); }, frames, commands, fetch, connection: parseDriverId(pairingId), get closes() { return closes; } };
 }
 
 test('encrypted SDK reuses session, hides commands, and preserves stable task IDs', async () => {
@@ -218,6 +219,56 @@ test('CLI closes sequential command sessions and writes screenshot bytes', async
     assert.equal(await fs.readFile(out, 'utf8'), 'hello');
     assert.equal(closed, 19);
   } finally { device.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('persistent browsers recover on the next explicit request after a new device epoch', async () => {
+  const hub = await endpoint(), browser = createBrowser(hub.connection, { fetch: hub.fetch });
+  try {
+    await browser.tabs(); await hub.restart();
+    await assert.rejects(browser.request('POST', '/api/actions', { actions: [] }), { code: 'unknown_outcome' });
+    assert.equal((await browser.tabs()).ok, true);
+    assert.equal(hub.commands.filter(command => command.path === '/api/actions').length, 0);
+    assert.equal(hub.frames.filter(frame => frame.payload.type === 'session.hello').length, 2);
+  } finally { await browser.close(); hub.device.close(); }
+});
+
+test('locally expired sessions renew before dispatch', async t => {
+  const hub = await endpoint(), browser = createBrowser(hub.connection, { fetch: hub.fetch });
+  const now = Date.now;
+  try {
+    await browser.tabs();
+    t.mock.method(Date, 'now', () => now() + 600001);
+    assert.equal((await browser.request('POST', '/api/actions', { actions: [] })).ok, true);
+    assert.equal(hub.commands.filter(command => command.path === '/api/actions').length, 1);
+    assert.equal(hub.frames.filter(frame => frame.payload.type === 'session.hello').length, 2);
+  } finally { await browser.close(); hub.device.close(); }
+});
+
+test('Hub response streams stop at a byte cap before JSON parsing', async () => {
+  const hub = await endpoint(); let chunks = 0, cancelled = false;
+  const browser = createBrowser(hub.connection, { fetch: async (url, options) => {
+    const response = await hub.fetch(url, options);
+    if (hub.commands.length !== 1 || JSON.parse(options.body).payload.type !== 'rpc' || cancelled) return response;
+    return new Response(new ReadableStream({
+      pull(controller) { chunks++; controller.enqueue(new Uint8Array(1024 * 1024)); },
+      cancel() { cancelled = true; },
+    }));
+  } });
+  try {
+    await assert.rejects(browser.tabs(), { code: 'response_too_large' });
+    assert.equal(cancelled, true); assert.ok(chunks <= 24);
+    assert.equal((await browser.tabs()).ok, true);
+  } finally { await browser.close(); hub.device.close(); }
+});
+
+test('close cancels a stalled handshake promptly even when fetch ignores its signal', async () => {
+  const hub = await endpoint(); let reached;
+  const waiting = new Promise(resolve => { reached = resolve; });
+  const browser = createBrowser(hub.connection, { fetch: () => { reached(); return new Promise(() => {}); } });
+  const rejected = assert.rejects(browser.tabs());
+  await waiting;
+  const started = Date.now(); await browser.close(); await rejected;
+  assert.ok(Date.now() - started < 1000); hub.device.close();
 });
 
 test('find filters accessible names before truncating and returns actionable refs', () => {
