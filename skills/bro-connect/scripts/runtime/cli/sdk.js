@@ -1,16 +1,12 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { validateHub } from '../extension/hub-url.js';
-import { HUB_URL } from '../config.js';
 import { isTaskRequest } from '../extension/protocol.js';
-
-export function routeIdFor(secret) {
-  return createHash('sha256').update(secret).digest('base64url').slice(0, 16);
-}
+import { parsePairing, deriveHubToken, createClient, LIMITS } from '../extension/relay-crypto.js';
 
 export function parseDriverId(value) {
-  const match = /^br-([A-Za-z0-9_-]{16,128})$/.exec(String(value || '').trim());
-  if (!match) throw new RelayError({ code: 'invalid_driver_id', message: 'Expected a br-<secret> driver ID', status: 400 });
-  return { driverId: match[1], routeId: routeIdFor(match[1]) };
+  const driverId = String(value || '').trim();
+  try { return { driverId, hubUrl: parsePairing(driverId).origin }; }
+  catch { throw new RelayError({ code: 'invalid_driver_id', message: 'Invalid or legacy driver ID; pair again', status: 400 }); }
 }
 
 export class RelayError extends Error {
@@ -24,33 +20,105 @@ export class RelayError extends Error {
   }
 }
 
-function endpoint(options, connection = {}) {
-  return validateHub(options.hubUrl ?? connection.hubUrl ?? HUB_URL);
-}
-
-function credentials(connection) {
-  if (!connection || !/^[A-Za-z0-9_-]{16,128}$/.test(connection.driverId || '')) {
-    throw new RelayError({ code: 'invalid_driver_id', message: 'Invalid saved connection; reconnect with the current driver ID' });
+function credentials(connection, options) {
+  const parsed = parseDriverId(connection?.driverId);
+  const pairing = parsePairing(parsed.driverId);
+  for (const hub of [connection?.hubUrl, options.hubUrl]) {
+    if (hub !== undefined && validateHub(hub) !== pairing.origin) {
+      throw new RelayError({ code: 'hub_mismatch', message: 'Hub differs from the paired origin; pair again to change it', status: 400 });
+    }
   }
-  return { secret: connection.driverId, routeId: routeIdFor(connection.driverId) };
+  return pairing;
 }
 
-async function responseJson(response) {
-  let data;
-  try { data = await response.json(); }
-  catch { throw new RelayError({ code: 'invalid_response', message: 'Hub returned an invalid response', status: response.status }); }
-  if (!response.ok || data?.ok === false) {
-    throw new RelayError({ ...data, status: data?.status || response.status });
+async function abortable(promise, signal) {
+  if (signal.aborted) { promise.catch(() => {}); signal.throwIfAborted(); }
+  let abort;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+    })]);
+  } finally { signal.removeEventListener('abort', abort); }
+}
+
+async function responseJson(response, signal, limit = Math.ceil((LIMITS.responseBytes + 16) * 4 / 3) + 4096) {
+  const reader = response.body?.getReader();
+  let data, size = 0;
+  const chunks = [];
+  try {
+    if (!reader) throw new Error('Missing response body');
+    while (true) {
+      const { done, value } = await abortable(reader.read(), signal);
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) throw new RelayError({ code: 'response_too_large', message: 'Hub response exceeds the byte limit' });
+      chunks.push(value);
+    }
+    data = JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
+  } catch (error) {
+    if (error instanceof RelayError || signal.aborted) throw error;
+    throw new RelayError({ code: 'invalid_response', message: 'Hub returned an invalid response', status: response.status });
+  } finally { reader?.cancel().catch(() => {}); }
+  if (!response.ok || data?.ok !== true) {
+    // Hub errors describe transport only and cannot authenticate browser outcomes.
+    throw new RelayError({ code: 'transport_error', message: 'Hub transport request failed', status: response.status,
+      transportCode: typeof data?.code === 'string' && /^[a-z_]{1,64}$/.test(data.code) ? data.code : undefined });
   }
   return data;
 }
 
 export function createBrowser(connection, options = {}) {
+  const pairing = credentials(connection, options);
   const fetchImpl = options.fetch ?? globalThis.fetch;
-  const hub = endpoint(options, connection);
-  const { secret, routeId } = credentials(connection);
+  let token, session, opening, closed = false;
+  const lifetime = new AbortController();
+  async function exchange(id, payload, signal, timeoutMs) {
+    token ??= await deriveHubToken(pairing);
+    const response = await abortable(fetchImpl(`${pairing.origin}/v1/rpc`, {
+      method: 'POST', redirect: 'error',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, routeId: pairing.route, timeoutMs, payload }), signal,
+    }), signal);
+    return (await responseJson(response, signal)).payload;
+  }
+  async function openResult(current, id, result) {
+    if (result?.type !== 'rpc.result') throw new RelayError({ code: 'invalid_response', message: 'Expected an encrypted browser response' });
+    const opened = await current.open(result.envelope);
+    if (opened.requestId !== id) throw new RelayError({ code: 'authentication_failed', message: 'Response request ID does not match' });
+    const value = opened.payload;
+    if (!Number.isInteger(value?.status) || value.status < 100 || value.status > 599 || !value.body || typeof value.body !== 'object') {
+      throw new RelayError({ code: 'invalid_response', message: 'Invalid encrypted browser response' });
+    }
+    return value;
+  }
+  async function connect(signal, timeoutMs) {
+    if (closed) throw new RelayError({ code: 'session_closed', message: 'Browser session is closed' });
+    signal = AbortSignal.any([signal, lifetime.signal]);
+    if (opening) return abortable(opening, signal);
+    if (session && Date.now() >= session.expires) { session.close(); session = undefined; }
+    if (session) return session;
+    opening = (async () => {
+      const client = await createClient(pairing);
+      const challenge = await exchange(randomUUID(), { type: 'session.hello', hello: client.hello }, signal, timeoutMs);
+      if (challenge?.type !== 'session.challenge') throw new RelayError({ code: 'authentication_failed', message: 'Expected an authenticated device challenge' });
+      const established = await client.finish(challenge.challenge);
+      // Keep the session for close even if the finish acknowledgement is lost.
+      session = established.session;
+      signal.throwIfAborted();
+      const id = randomUUID();
+      const result = await openResult(session, id, await exchange(id, { type: 'session.finish', finish: established.finish }, signal, timeoutMs));
+      if (result.status !== 200 || result.body.ok !== true) throw new RelayError({ code: 'authentication_failed', message: 'Device refused the session' });
+      return session;
+    })();
+    try { return await opening; }
+    catch (error) { await retire(session); throw error; }
+    finally { opening = undefined; }
+  }
   async function request(method, path, body, { signal, timeoutMs = 35000 } = {}) {
     if (signal?.aborted) throw new RelayError({ code: 'request_cancelled', message: 'Request cancelled before dispatch', status: 409, retryable: false });
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('Expected a positive timeoutMs');
+    timeoutMs = Math.min(timeoutMs, 35000);
     const query = new URL(path, 'http://relay.local');
     if (!path.startsWith('/api/') || !['GET', 'POST'].includes(method)) throw new Error('Expected GET or POST and an /api/ path');
     const tracked = isTaskRequest(method, query.pathname);
@@ -62,22 +130,24 @@ export function createBrowser(connection, options = {}) {
     }
     const controller = new AbortController();
     const abort = () => controller.abort();
-    if (signal?.aborted) abort();
-    else signal?.addEventListener('abort', abort, { once: true });
+    signal?.addEventListener('abort', abort, { once: true });
+    const requestSignal = AbortSignal.any([controller.signal, lifetime.signal]);
     const timer = setTimeout(abort, timeoutMs);
+    let current, dispatched = false, authenticated = false;
     try {
-      const response = await fetchImpl(`${hub}/v1/rpc`, {
-        method: 'POST', redirect: 'error',
-        headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: randomUUID(), routeId, method, path, body: body ?? null }),
-        signal: controller.signal,
-      });
-      return await responseJson(response);
+      current = await connect(requestSignal, Math.min(timeoutMs, 30000));
+      if (requestSignal.aborted) throw new RelayError({ code: 'request_cancelled', message: 'Request cancelled before dispatch', status: 409 });
+      const id = randomUUID();
+      const envelope = await current.seal(id, { kind: 'rpc', method, path, body: body ?? null, deadline: Date.now() + Math.min(timeoutMs, 30000) });
+      if (requestSignal.aborted) throw new RelayError({ code: 'request_cancelled', message: 'Request cancelled before dispatch', status: 409 });
+      dispatched = true;
+      const result = await openResult(current, id, await exchange(id, { type: 'rpc', envelope }, requestSignal, Math.min(timeoutMs, 30000)));
+      authenticated = true;
+      if (result.status >= 400 || result.body.ok === false) throw new RelayError({ ...result.body, status: result.status });
+      return result.body;
     } catch (error) {
-      const uncertain = !(error instanceof RelayError) ||
-        ['invalid_response', 'remote_request_timeout', 'rpc_timeout', 'remote_device_offline', 'remote_send_failed'].includes(error.code);
-      if (!uncertain || (method === 'GET' && !tracked && error instanceof RelayError)) {
-        if (taskId) { error.taskId ||= taskId; error.payload.taskId ||= taskId; }
+      if (!dispatched || authenticated || (method === 'GET' && !tracked)) {
+        if (authenticated && taskId) { error.taskId ||= taskId; error.payload.taskId ||= taskId; }
         throw error;
       }
       let cancellationRequested = false;
@@ -95,70 +165,52 @@ export function createBrowser(connection, options = {}) {
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
+      if (!authenticated) await retire(current);
     }
   }
-  return {
-    request,
-    capabilities: () => request('GET', '/api/capabilities'),
-    tabs: () => request('GET', '/api/tabs'),
-  };
+  async function retire(current) {
+    if (!current || session !== current) return;
+    session = undefined;
+    try {
+      const id = randomUUID();
+      const envelope = await current.seal(id, { kind: 'close' });
+      await openResult(current, id, await exchange(id, { type: 'rpc', envelope }, AbortSignal.timeout(2500), 2500));
+    } catch { /* Best effort cleanup; never mask the command result. */ }
+    finally { current.close(); }
+  }
+  async function close() {
+    closed = true;
+    lifetime.abort();
+    try { await opening; } catch { /* Failed handshakes already retire their session. */ }
+    await retire(session);
+  }
+  return { request, close, capabilities: () => request('GET', '/api/capabilities'), tabs: () => request('GET', '/api/tabs') };
 }
 
 export async function status(connection, options = {}) {
-  const { secret, routeId } = credentials(connection);
-  const response = await (options.fetch ?? globalThis.fetch)(`${endpoint(options, connection)}/v1/status/${routeId}`, {
-    redirect: 'error', headers: { Authorization: `Bearer ${secret}` },
-    signal: AbortSignal.timeout(options.timeoutMs ?? 10000),
-  });
-  return responseJson(response);
-}
-
-const HELLO_FRESH_MS = 22_000;
-
-export function capabilitiesFromHello(hello) {
-  const protocolVersion = hello?.executor?.protocolVersion ?? hello?.protocolVersion;
-  const features = hello?.executor?.features ?? hello?.capabilities;
-  return {
-    protocolVersion: Number.isInteger(protocolVersion) ? protocolVersion : undefined,
-    features: Array.isArray(features) ? features : undefined,
-  };
-}
-
-export function isHelloFresh(current, now = Date.now(), maxAgeMs = HELLO_FRESH_MS) {
-  if (!current?.connected) return false;
-  const seen = Date.parse(current.lastSeen || current.connectedAt || '');
-  return Number.isFinite(seen) && now - seen <= maxAgeMs;
+  const pairing = credentials(connection, options);
+  const token = await deriveHubToken(pairing);
+  const signal = AbortSignal.timeout(Math.min(options.timeoutMs ?? 10000, 35000));
+  const response = await abortable((options.fetch ?? globalThis.fetch)(`${pairing.origin}/v1/status/${pairing.route}`, {
+    redirect: 'error', headers: { Authorization: `Bearer ${token}` },
+    signal,
+  }), signal);
+  const data = await responseJson(response, signal, 4096);
+  return { ok: true, transportOnly: true, connected: data.connected === true, lastSeen: data.lastSeen ?? null };
 }
 
 export async function handshake(connection, options = {}) {
-  const attempts = options.attempts ?? 3;
-  const retryDelayMs = options.retryDelayMs ?? 250;
-  let lastError;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      const current = await status(connection, options);
-      const fromHello = capabilitiesFromHello(current.hello);
-      if (current.connected && isHelloFresh(current) && fromHello.protocolVersion === 2) {
-        return { connected: true, protocolVersion: 2, features: fromHello.features || [] };
-      }
-      if (!current.connected) {
-        throw new RelayError({ code: 'remote_device_offline', message: 'Remote Browser Relay device is offline', status: 409, retryable: true });
-      }
-      const capabilities = await createBrowser(connection, options).capabilities();
-      if (capabilities.protocolVersion !== 2) {
-        throw new RelayError({ code: 'incompatible_extension', message: 'Install the matching Bro Relay Debug extension', status: 409 });
-      }
-      return { connected: true, protocolVersion: 2, features: capabilities.features || [] };
-    } catch (error) {
-      lastError = error;
-      const retryable = error instanceof RelayError && error.code === 'remote_device_offline';
-      if (!retryable || i === attempts - 1) throw error;
-      await new Promise(resolve => setTimeout(resolve, retryDelayMs * (i + 1)));
-    }
-  }
-  throw lastError;
+  const browser = createBrowser(connection, options);
+  try {
+    const capabilities = await browser.capabilities();
+    if (capabilities.protocolVersion !== 2) throw new RelayError({ code: 'incompatible_extension', message: 'Install the matching Bro Relay Debug extension', status: 409 });
+    return { connected: true, protocolVersion: 2, features: capabilities.features || [],
+      ...(capabilities.connection ? { remoteDiagnostic: capabilities.connection } : {}) };
+  } finally { await browser.close(); }
 }
 
-export function request(connection, method, path, body, options = {}) {
-  return createBrowser(connection, options).request(method, path, body, options);
+export async function request(connection, method, path, body, options = {}) {
+  const browser = createBrowser(connection, options);
+  try { return await browser.request(method, path, body, options); }
+  finally { await browser.close(); }
 }

@@ -1,7 +1,8 @@
+import { createPairing, parsePairing, deriveHubToken, createDevice, LIMITS } from './relay-crypto.js';
 import { validateHub } from './hub-url.js';
 // Owns the persisted switch/credential and exactly one authenticated socket.
-export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop, onStatus = () => {}, hasPermission = async () => true, socketFactory = url => new WebSocket(url) }) {
-  let config = {}, generation = 0, socket, authenticated = false, connecting, connectionAbort;
+export function createRemoteControl({ storage, hubUrl, onRequest, onStop, onStatus = () => {}, hasPermission = async () => true, socketFactory = url => new WebSocket(url) }) {
+  let config = {}, generation = 0, socket, authenticated = false, connecting, connectionAbort, encryptedDevice;
   let reconnectTimer, heartbeatTimer, rejectConnect, mutations = Promise.resolve(), stopping = Promise.resolve();
   hubUrl = validateHub(hubUrl);
   let lastError = null, attempt = 0, diagnostic = null;
@@ -13,6 +14,7 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
   const publish = () => onStatus(status());
   function close() {
     connectionAbort?.abort(); connectionAbort = undefined;
+    encryptedDevice?.close(); encryptedDevice = undefined;
     clearTimeout(reconnectTimer); reconnectTimer = undefined;
     clearInterval(heartbeatTimer); heartbeatTimer = undefined;
     const old = socket;
@@ -25,7 +27,7 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
   }
   function sendHello() {
     if (!socket) throw new Error('not connected');
-    socket.send(JSON.stringify({ type: 'device.hello', ...hello }));
+    socket.send(JSON.stringify({ type: 'device.hello' }));
   }
   function heartbeat() {
     if (!authenticated || !socket) return false;
@@ -39,7 +41,11 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
   }
   function connect() {
     if (connecting) return connecting;
-    const pending = connectOnce().finally(() => { if (connecting === pending) connecting = undefined; });
+    const revision = generation;
+    const pending = connectOnce().catch(() => {
+      if (revision === generation) { close(); lastError = 'Hub connection failed'; record('ws_auth', 'failed', Date.now(), 'transport_failed'); publish(); schedule(revision); }
+      return status();
+    }).finally(() => { if (connecting === pending) connecting = undefined; });
     connecting = pending;
     return pending;
   }
@@ -54,24 +60,31 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
       return status();
     }
     if (revision !== generation || !config.remoteControlEnabled) return status();
+    const pairing = parsePairing(config.remoteDeviceId);
+    if (pairing.origin !== origin) throw new Error('Pair again for the selected Hub');
+    const [token, device] = await Promise.all([deriveHubToken(pairing), createDevice(pairing)]);
+    if (revision !== generation || !config.remoteControlEnabled) { device.close(); return status(); }
+    encryptedDevice = device;
     const started = Date.now();
     record('ws_auth', 'pending', started);
     const wsUrl = new URL('/v1/device/connect', origin);
     wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:';
-    wsUrl.searchParams.set('routeId', config.remoteRouteId);
+    wsUrl.searchParams.set('routeId', pairing.route);
     const ws = socketFactory(wsUrl.href);
     const abort = new AbortController();
     connectionAbort = abort;
     socket = ws;
     const current = () => revision === generation && socket === ws && config.remoteControlEnabled;
+    let inFlight = 0;
     const auth = new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('Hub connection timed out')), 8000);
       rejectConnect = error => { clearTimeout(timer); reject(error); };
-      ws.onopen = () => { if (current()) ws.send(JSON.stringify({ type: 'device.auth', secret: config.remoteSecret })); };
-      ws.onerror = () => { if (current()) rejectConnect?.(new Error('Hub connection failed')); };
+      ws.onopen = () => { if (current()) ws.send(JSON.stringify({ type: 'device.auth', secret: token })); };
+      ws.onerror = () => { if (current()) { rejectConnect?.(new Error('Hub connection failed')); ws.close(); } };
       ws.onclose = () => {
         if (!current()) return;
         abort.abort();
+        device.close();
         rejectConnect?.(new Error('Hub disconnected'));
         authenticated = false;
         socket = undefined;
@@ -85,7 +98,9 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
       ws.onmessage = event => {
         if (!current()) return;
         let message;
-        try { message = JSON.parse(String(event.data)); } catch { return; }
+        if (typeof event.data !== 'string' || event.data.length > Math.ceil((LIMITS.requestBytes + 16) * 4 / 3) + 4096) { ws.close(1009, 'message too large'); return; }
+        try { message = JSON.parse(event.data); } catch { return; }
+        if (!message || typeof message !== 'object') return;
         if (!authenticated) {
           if (message.type !== 'device.authenticated') return;
           clearTimeout(timer);
@@ -105,13 +120,63 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
           if (current() && authenticated) ws.send(JSON.stringify({ type: 'device.pong', id: message.id }));
           return;
         }
-        if (message.type !== 'rpc.request') return;
+        if (message.type !== 'rpc.request' || !/^[A-Za-z0-9_-]{1,128}$/.test(message.id || '')) return;
+        const reject = code => {
+          if (current()) { try { ws.send(JSON.stringify({ type: 'rpc.response', id: message.id, error: { code } })); } catch { ws.close(); } }
+        };
+        if (inFlight >= 32) { reject('quota_exceeded'); return; }
+        inFlight++;
         void (async () => {
-          if (!current() || !authenticated) return;
-          let response;
-          try { response = await onRequest(message, abort.signal); }
-          catch (error) { response = { status: 500, body: { ok: false, code: 'remote_exec_failed', message: error.message } }; }
-          if (current() && authenticated) ws.send(JSON.stringify({ type: 'rpc.response', id: message.id, ...response }));
+          let sessionToClose;
+          try {
+            if (!current()) return;
+            const payload = message.payload;
+            let result;
+            if (payload?.type === 'session.hello') {
+              result = { type: 'session.challenge', challenge: await device.accept(payload.hello) };
+            } else if (payload?.type === 'session.finish') {
+              const session = await device.finish(payload.finish);
+              result = { type: 'rpc.result', envelope: await session.seal(message.id, { status: 200, body: { ok: true } }) };
+            } else if (payload?.type === 'rpc') {
+              const session = device.getSession(payload.envelope?.session);
+              const opened = await session.open(payload.envelope);
+              if (opened.requestId !== message.id) throw { code: 'authentication_failed' };
+              if (!current()) return;
+              const request = opened.payload;
+              let response;
+              if (request?.kind === 'close') {
+                sessionToClose = session;
+                response = { status: 200, body: { ok: true } };
+              } else {
+                const remaining = request?.deadline - Date.now();
+                if (request?.kind !== 'rpc' || !['GET', 'POST'].includes(request.method) ||
+                    typeof request.path !== 'string' || !request.path.startsWith('/api/') ||
+                    !Number.isSafeInteger(request.deadline) || remaining <= 0 || remaining > 30_000) {
+                  response = { status: 400, body: { ok: false, code: 'invalid_request', message: 'Invalid or expired encrypted request' } };
+                } else {
+                  const requestAbort = new AbortController();
+                  const cancel = () => requestAbort.abort();
+                  abort.signal.addEventListener('abort', cancel, { once: true });
+                  const deadline = setTimeout(cancel, remaining);
+                  try {
+                    if (abort.signal.aborted) requestAbort.abort();
+                    response = await onRequest(request, requestAbort.signal);
+                    if (request.path === '/api/capabilities') response.body.connection = diagnostic;
+                  } catch (error) {
+                    response = { status: error.status || 500, body: { ok: false, code: error.code || 'remote_exec_failed', message: error.message || 'Remote request failed' } };
+                  } finally { clearTimeout(deadline); abort.signal.removeEventListener('abort', cancel); }
+                }
+              }
+              try { result = { type: 'rpc.result', envelope: await session.seal(message.id, response) }; }
+              catch (error) {
+                if (error.code !== 'quota_exceeded') throw error;
+                result = { type: 'rpc.result', envelope: await session.seal(message.id, { status: 413, body: { ok: false, code: 'response_body_too_large', message: 'Remote response exceeds size limit; reduce screenshot dimensions' } }) };
+              }
+            } else throw { code: 'invalid_message' };
+            if (current()) ws.send(JSON.stringify({ type: 'rpc.response', id: message.id, payload: result }));
+          } catch (error) {
+            reject(['authentication_failed', 'session_expired', 'quota_exceeded'].includes(error.code) ? error.code : 'invalid_message');
+          } finally { sessionToClose?.close(); inFlight--; }
         })();
       };
     });
@@ -127,12 +192,13 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
   }
   const ready = (async () => {
     const revision = generation;
-    const stored = await storage.get(['remoteControlEnabled', 'remoteSecret', 'remoteRouteId', 'remoteDeviceId', 'remoteHubUrl']);
+    const stored = await storage.get(['remoteControlEnabled', 'remoteDeviceId', 'remoteHubUrl']);
     if (revision !== generation) return;
     config = stored;
     try { config.remoteHubUrl = validateHub(config.remoteHubUrl || hubUrl); }
     catch { config.remoteControlEnabled = false; lastError = 'Invalid saved Hub address'; }
-    if (!config.remoteSecret || !config.remoteRouteId) config.remoteControlEnabled = false;
+    try { if (parsePairing(config.remoteDeviceId).origin !== config.remoteHubUrl) throw new Error(); }
+    catch { config.remoteControlEnabled = false; }
     publish();
     void connect();
   })();
@@ -149,22 +215,18 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
     mutations = mutations.catch(() => {}).then(async () => {
       await stopped;
       if (revision !== generation) return status();
-      let saved = await storage.get(['remoteSecret', 'remoteRouteId', 'remoteDeviceId', 'remoteHubUrl']);
-      if (origin !== (saved.remoteHubUrl || hubUrl)) {
-        saved = { remoteSecret: '', remoteRouteId: '', remoteDeviceId: '' };
-      }
-      if (enabled && (!saved.remoteSecret || rotate)) {
-        const bytes = crypto.getRandomValues(new Uint8Array(32));
-        const secret = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-        const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret)));
-        saved = { remoteSecret: secret, remoteDeviceId: `br-${secret}`,
-          remoteRouteId: btoa(String.fromCharCode(...digest)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '').slice(0, 16) };
-      }
+      let saved = await storage.get(['remoteDeviceId', 'remoteHubUrl']);
+      let valid = false;
+      try { valid = parsePairing(saved.remoteDeviceId).origin === origin; } catch {}
+      if (!valid) saved = { remoteDeviceId: '' };
+      if (enabled && (!valid || rotate)) saved = { remoteDeviceId: await createPairing(origin) };
       if (revision !== generation) return status();
       await storage.set({ ...saved, remoteHubUrl: origin, remoteControlEnabled: enabled });
+      await storage.remove?.(['remoteSecret', 'remoteRouteId']);
       if (revision !== generation) return status();
       config = { ...saved, remoteHubUrl: origin, remoteControlEnabled: enabled };
       lastError = null;
+      diagnostic = null;
       publish();
       return enabled ? connect() : status();
     });

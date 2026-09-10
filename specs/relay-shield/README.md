@@ -4,15 +4,15 @@
 
 ## Next Agent Prompt
 
-01/02 的本地诊断和入口配置已通过测试；Worker 资源上限已合入。下一步合入已独立审阅的 04 加密模块并实施 05。用户于 2026-09-11 授权开始修复，并明确优先继续在 Cloudflare 上部署 `relay.xxww.club`。非 CF Hub 暂缓，不再是加密集成前置；仅在远端实测仍不可达时重开。每次结束前更新本段与阶段证据。
+01/02 本地诊断和入口配置、03 Worker 限额、04 加密协议及 05 集成已完成。51 项回归、Chromium 链路、真实 workerd 和线上加密往返通过，详见 [验证记录](verification.md)。新版 Worker 已部署到 `relay.xxww.club`；最后的自动回复关闭帧配置已本地验证，但补发因 Cloudflare OAuth 失效而待完成。01/07 的目标远端网络测量仍待实测。用户明确优先 Cloudflare，非 CF Hub 与 HTTPS 回退暂缓。
 
 采用新扩展、CLI、Hub 协同切换，重新生成配对秘密，不自动降级明文。基线为 `f59e615`；用户已有三处版本号改为 0.1.5，应保留。尚缺远端网络测量，不能声称大陆可达性验收完成。已有 Cloudflare API 访问能力，部署使用现有 `browser-relay-hub` Worker。
 
 - [ ] [01 可达性诊断与基线](slices/01-reachability.md)
 - [ ] [02 运行时入口与权限](slices/02-endpoints.md)
-- [ ] [03 Worker 资源限制；非 CF Hub 暂缓](slices/03-portable-hub.md)
-- [ ] [04 加密协议验证原型](slices/04-crypto-contract.md)
-- [ ] [05 端到端加密集成](slices/05-encrypted-rpc.md)
+- [x] [03 Worker 资源限制；非 CF Hub 暂缓](slices/03-portable-hub.md)
+- [x] [04 加密协议验证原型](slices/04-crypto-contract.md)
+- [x] [05 端到端加密集成](slices/05-encrypted-rpc.md)
 - [ ] [06 HTTPS 回退验证及条件实施](slices/06-https-fallback.md)
 - [ ] [07 演练与发布验收](slices/07-validation.md)
 
@@ -22,7 +22,7 @@
 
 正式入口为 `https://relay.xxww.club`；CLI 使用该 HTTPS 源，扩展连接 `wss://relay.xxww.club/v1/device/connect`。复用 `BRO_RELAY_HUB_URL` 同步构建默认值和权限；实施时将构建配置设为 `BRO_RELAY_HUB_URL=https://relay.xxww.club`；用户已授权实施；通过测试后绑定既有 Worker 并同步配置。域名所有权与后端托管分开决定，自有域名仍须通过 01 的远端链路验收。
 
-2026-09-10 已通过 Cloudflare API 只读核查：当前账户的 `639366.xyz`、`gmali.buzz`、`ozon-pod.com`、`xxww.club` 四个 zone 均 active、未暂停。各自 `relay.<zone>` 未见 DNS 记录、Workers 自定义域绑定或 Workers 路由占用；这表示配置层可作为候选，不表示已经部署或网络可达。用户已于 2026-09-11 选定 `relay.xxww.club`；前两个根域已有临时邮件 Worker，保留现有业务。已查到其他子域的非代理 A 记录，但不据此假定这些主机可部署 Hub。本次未改 DNS 或 Worker。
+2026-09-10 已通过 Cloudflare API 只读核查：当前账户的 `639366.xyz`、`gmali.buzz`、`ozon-pod.com`、`xxww.club` 四个 zone 均 active、未暂停。各自 `relay.<zone>` 未见 DNS 记录、Workers 自定义域绑定或 Workers 路由占用；这表示配置层可作为候选，不表示已经部署或网络可达。用户已于 2026-09-11 选定 `relay.xxww.club`；前两个根域已有临时邮件 Worker，保留现有业务。已查到其他子域的非代理 A 记录，但不据此假定这些主机可部署 Hub。随后已绑定所选自定义域并部署新版 Worker，详见验证记录。
 
 依赖：`01 → 02 → 05 → 07`，`04 → 05`；03 本轮仅执行 Worker 资源限制，非 CF 部署暂缓。04 可与入口工作独立进行。06 在 05 后按实测决定，必要时成为 07 的发布前置。第一个有用成果是两端各自的诊断报告，第二个是远端直连候选 Hub 的真实 RPC。
 

@@ -66,7 +66,7 @@ npx wrangler@4 deploy --config hub/wrangler.toml
 记下终端输出的正式地址，例如：
 
 ```text
-https://bro-relay-debug-hub.YOUR_SUBDOMAIN.workers.dev
+https://browser-relay-hub.YOUR_SUBDOMAIN.workers.dev
 ```
 
 使用终端实际输出的地址，不要照抄示例中的占位符。
@@ -77,7 +77,7 @@ https://bro-relay-debug-hub.YOUR_SUBDOMAIN.workers.dev
 将下面的域名替换为刚部署的地址：
 
 ```sh
-curl --fail-with-body "https://bro-relay-debug-hub.YOUR_SUBDOMAIN.workers.dev/v1/health"
+curl --fail-with-body "https://browser-relay-hub.YOUR_SUBDOMAIN.workers.dev/v1/health"
 ```
 
 把 `YOUR_SUBDOMAIN` 替换为自己的子域。正常响应包含 `"ok": true`；
@@ -95,7 +95,7 @@ cp .env.example .env
 将 `.env` 中的值改为自己的正式地址：
 
 ```dotenv
-BRO_RELAY_HUB_URL=https://bro-relay-debug-hub.YOUR_SUBDOMAIN.workers.dev
+BRO_RELAY_HUB_URL=https://browser-relay-hub.YOUR_SUBDOMAIN.workers.dev
 ```
 
 地址只包含 `https://` 和域名，不加 `/v1/rpc`、路径、查询参数或密码。
@@ -179,8 +179,9 @@ npx wrangler@4 tail --config hub/wrangler.toml
 转交给扩展中的浏览器执行器。驱动 ID 是访问凭证，代理端的连接文件使用受限权限保存。
 停用开关会断开控制，重新启用保留原 ID；重新生成 ID 会使旧连接失效。
 
-Hub 能看到转发内容，因此必须使用自己信任的 Hub。普通请求头脱敏不能替代对
-页面内容的隐私判断。任务取消只停止后续操作，不撤销已完成的点击或提交；
+新 `br2` 配对使用端到端认证加密：Hub 只转发密文，无法读取或伪造操作、页面内容和结果，
+仍可观察连接、长度与时间，并可阻断服务。升级扩展和 CLI 后须重新生成驱动 ID；旧 ID 不再支持。
+任务取消只停止后续操作，不撤销已完成的点击或提交；
 网络超时后应检查任务和页面结果，不能盲目重试。
 
 ## 验证与维护

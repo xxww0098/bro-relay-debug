@@ -335,7 +335,6 @@ let automation = createAutomation({
 const control = createRemoteControl({
   storage: chrome.storage.local, hubUrl: HUB_URL,
   hasPermission: origin => chrome.permissions.contains({ origins: [`${origin}/*`] }),
-  hello: { version: chrome.runtime.getManifest().version, protocolVersion: PROTOCOL_VERSION, deviceName: 'Bro Relay Debug', capabilities: FEATURES, executor: executorInfo() },
   onRequest: (message, signal) => executeRemoteApi(message.method, message.path, message.body, signal),
   onStop: stopControl,
   onStatus: state => {

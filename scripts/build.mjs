@@ -9,7 +9,7 @@ export { validateHub };
 
 export async function buildSkill(root = fileURLToPath(new URL('../', import.meta.url))) {
   const runtime = join(root, 'skills/bro-connect/scripts/runtime');
-  for (const file of ['cli/index.js', 'cli/sdk.js', 'cli/doctor.js', 'config.js', 'extension/protocol.js', 'extension/hub-url.js']) {
+  for (const file of ['cli/index.js', 'cli/sdk.js', 'cli/doctor.js', 'config.js', 'extension/protocol.js', 'extension/hub-url.js', 'extension/relay-crypto.js']) {
     await mkdir(resolve(runtime, file, '..'), { recursive: true });
     await cp(join(root, file), join(runtime, file));
   }

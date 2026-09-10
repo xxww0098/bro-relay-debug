@@ -1,9 +1,8 @@
-import { isTaskRequest } from "../../extension/protocol.js";
+import { LIMITS } from "../../extension/relay-crypto.js";
 import { pingSocket, sendRpc } from "./rpc.js";
-const MAX_BODY_SIZE = 128 * 1024;
-const MAX_RESPONSE_SIZE = 16 * 1024 * 1024;
+const MAX_BODY_SIZE = Math.ceil((LIMITS.requestBytes + 16) * 4 / 3) + 4096;
+const MAX_RESPONSE_SIZE = Math.ceil((LIMITS.responseBytes + 16) * 4 / 3) + 4096;
 const RPC_TIMEOUT_MS = 30_000;
-const READ_RPC_TIMEOUT_MS = 8_000;
 const DEVICE_AUTH_TIMEOUT_MS = 5_000;
 const STALE_MS = 22_000;
 const PING_TIMEOUT_MS = 2_000;
@@ -84,11 +83,11 @@ function safeEqualString(a, b) {
 }
 
 function isRouteId(value) {
-  return /^[A-Za-z0-9_-]{10,}$/.test(String(value || ""));
+  return /^[A-Za-z0-9_-]{16}$/.test(String(value || ""));
 }
 
 function isSecret(value) {
-  return /^[A-Za-z0-9_-]{16,}$/.test(String(value || ""));
+  return /^[A-Za-z0-9_-]{16,128}$/.test(String(value || ""));
 }
 
 function websocketPair() {
@@ -198,15 +197,10 @@ export class BrowserRelayDevice {
       return true;
     };
 
-    const legacySecret = url.searchParams.get("token") || bearerToken(request.headers);
-    if (legacySecret && !(await authenticate(legacySecret))) {
-      return new Response(null, { status: 101, webSocket: client });
-    }
-
     server.addEventListener("message", (event) => {
       void (async () => {
         if (closed) return;
-        if (typeof event.data !== "string" || new TextEncoder().encode(event.data).byteLength > (authenticated ? MAX_RESPONSE_SIZE : MAX_BODY_SIZE)) {
+        if (typeof event.data !== "string" || new TextEncoder().encode(event.data).byteLength > (authenticated ? MAX_RESPONSE_SIZE : 4096)) {
           if (authenticated) this.handleDeviceClose(server, "response_body_too_large");
           close(1009, "message too large");
           return;
@@ -266,23 +260,20 @@ export class BrowserRelayDevice {
     const secret = bearerToken(request.headers);
     const auth = await this.authorize(secret, { routeId: String(body.routeId || "") });
     if (!auth.ok) return jsonResponse(errorPayload(auth.code, auth.message, { status: auth.status }), auth.status);
-    if (!body.method || !body.path) {
-      return jsonResponse(errorPayload("invalid_request", "method and path are required", { status: 400 }), 400);
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(body.id || '') ||
+        !['session.hello', 'session.finish', 'rpc'].includes(body.payload?.type)) {
+      return jsonResponse(errorPayload("incompatible_client", "Use the matching encrypted client and pair again", { status: 426 }), 426);
     }
-
+    if (!Number.isInteger(body.timeoutMs) || body.timeoutMs < 1 || body.timeoutMs > RPC_TIMEOUT_MS) {
+      return jsonResponse(errorPayload("invalid_request", "Invalid relay timeout", { status: 400 }), 400);
+    }
     try {
       const response = await this.sendRpcToDevice(body, request.signal);
-      const status = Number(response.status) || 200;
-      if (typeof response.body === "string") {
-        return new Response(response.body, {
-          status,
-          headers: {
-            "Content-Type": response.headers?.["content-type"] || response.headers?.["Content-Type"] || "text/plain",
-            "Cache-Control": "no-store",
-          },
-        });
+      if (response.error) {
+        const code = ['authentication_failed', 'session_expired', 'quota_exceeded', 'invalid_message'].includes(response.error.code) ? response.error.code : 'invalid_message';
+        return jsonResponse(errorPayload(code, 'Encrypted session rejected the message', { status: 409 }), 409);
       }
-      return jsonResponse(response.body ?? null, status);
+      return jsonResponse({ ok: true, payload: response.payload });
     } catch (err) {
       const payload = err && typeof err === "object" && "code" in err
         ? err
@@ -321,10 +312,7 @@ export class BrowserRelayDevice {
         throw errorPayload("remote_device_offline", "Remote Browser Relay device is offline", { status: 409, retryable: true });
       }
     }
-    const path = new URL(requestBody.path, "http://relay.local").pathname;
-    const timeoutMs = isTaskRequest(requestBody.method, path) || path === "/api/screenshot"
-      ? RPC_TIMEOUT_MS : READ_RPC_TIMEOUT_MS;
-    return sendRpc(this.deviceSocket, this.pending, requestBody, { signal, timeoutMs });
+    return sendRpc(this.deviceSocket, this.pending, requestBody, { signal, timeoutMs: requestBody.timeoutMs });
   }
 
   async handleStatus(request) {

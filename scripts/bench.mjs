@@ -75,7 +75,7 @@ try {
     if (Date.now() - started > 10000) throw new Error('extension did not connect')
     await new Promise((r) => setTimeout(r, 50))
   }
-  const secret = (await popup.locator('#remoteDeviceId').inputValue()).slice(3)
+  const secret = await popup.locator('#remoteDeviceId').inputValue()
   const browser = createBrowser({ driverId: secret }, { hubUrl: hub.url })
   await browser.tabs()
   await page.bringToFront()
@@ -157,13 +157,13 @@ try {
   await writeFile(join(cliRoot, 'config.js'), `export const HUB_URL = ${JSON.stringify(hub.url)}\n`)
   await writeFile(join(cliRoot, 'package.json'), '{"type":"module"}\n')
   await mkdir(join(cliRoot, 'extension'), { recursive: true })
-  await cp(join(root, 'extension', 'protocol.js'), join(cliRoot, 'extension', 'protocol.js'))
+  for (const file of ['protocol.js', 'hub-url.js', 'relay-crypto.js']) await cp(join(root, 'extension', file), join(cliRoot, 'extension', file))
   const cliEnv = { ...process.env, BRO_RELAY_STATE_DIR: join(cliRoot, 'state') }
   const cli = (args) => new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [join(cliRoot, 'cli/index.js'), ...args], { cwd: cliRoot, env: cliEnv })
     let stdout = ''; child.stdout.on('data', (chunk) => { stdout += chunk }); child.on('close', (code) => resolve({ code, stdout })); child.on('error', reject)
   })
-  await cli(['connect', 'br-' + secret])
+  await cli(['connect', secret])
   await cli(['eval', '1+1', '--tab', tabId])
   await reset(worker)
   const cliSamples = []

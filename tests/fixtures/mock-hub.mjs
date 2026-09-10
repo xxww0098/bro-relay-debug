@@ -5,6 +5,7 @@ export async function createMockHub() {
   const routes = new Map()
   const wss = new WebSocketServer({ noServer: true })
   const server = http.createServer(async (req, res) => {
+    if (req.url === '/v1/health') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ ok: true, service: 'browser-relay-hub' })); return; }
     if (req.method === 'GET' && req.url.startsWith('/v1/status/')) {
       const routeId = decodeURIComponent(req.url.slice('/v1/status/'.length).split('?')[0])
       const auth = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
@@ -31,15 +32,15 @@ export async function createMockHub() {
       res.writeHead(409, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: false, code: 'remote_device_offline', message: 'offline', status: 409 })); return
     }
-    const id = `mock-${Date.now()}-${Math.random()}`
+    const id = body.id
     const response = new Promise((resolve) => {
       const timer = setTimeout(() => { route.pending.delete(id); resolve({ status: 504, body: { ok: false, code: 'timeout' } }) }, 10000)
-      route.pending.set(id, (msg) => { clearTimeout(timer); resolve(msg) })
+      route.pending.set(id, (msg) => { clearTimeout(timer); route.pending.delete(id); resolve(msg) })
     })
-    route.socket.send(JSON.stringify({ type: 'rpc.request', id, method: body.method, path: body.path, body: body.body }))
+    route.socket.send(JSON.stringify({ type: 'rpc.request', id, payload: body.payload }))
     const result = await response
-    res.writeHead(result.status || 200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify(result.body ?? {}))
+    res.writeHead(result.error ? 409 : 200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(result.error ? { ok: false, code: result.error.code } : { ok: true, payload: result.payload }))
   })
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, 'http://127.0.0.1')

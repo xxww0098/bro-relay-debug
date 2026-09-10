@@ -11,7 +11,7 @@
     "offscreen"
   ],
   "host_permissions": [
-    "https://browser-relay-hub.xiewei63936.workers.dev/*"
+    "https://relay.xxww.club/*"
   ],
   "background": {
     "service_worker": "background.js",

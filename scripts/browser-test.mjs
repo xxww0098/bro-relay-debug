@@ -80,7 +80,7 @@ try {
   try { await waitFor(async () => /已连接/.test(await popup.locator('#remoteState').textContent()), 10000) }
   catch (error) { throw new Error(`${error.message}; state=${await popup.locator('#remoteState').textContent()}; status=${await popup.locator('#remoteStatus').textContent()}`) }
   const firstId = await popup.locator('#remoteDeviceId').inputValue()
-  assert.match(firstId, /^br-[A-Za-z0-9_-]{16,}$/)
+  assert.match(firstId, /^br2\./)
   // Both surfaces must copy through the visible control, including keyboard use.
   await context.grantPermissions(['clipboard-read', 'clipboard-write'])
   for (const surface of ['popup.html', 'options.html']) {
@@ -103,7 +103,7 @@ try {
   assert.equal(await popup.locator('#remoteDeviceId').evaluate(el => el.selectionEnd - el.selectionStart), firstId.length)
   await popup.goto(`chrome-extension://${extensionId}/popup.html`)
   await waitFor(async () => (await popup.locator('#remoteDeviceId').inputValue()) === firstId)
-  const firstSecret = firstId.slice(3)
+  const firstSecret = firstId
   await popup.evaluate(() => { document.querySelector('#remoteDeviceId').value = '[REDACTED]' })
   await popup.screenshot({ path: join(artifacts, 'popup.png'), animations: 'disabled' })
   const browser = createBrowser({ driverId: firstSecret }, { hubUrl: hub.url })
@@ -137,7 +137,7 @@ try {
   const secondId = await popup.locator('#remoteDeviceId').inputValue()
   assert.notEqual(secondId, firstId)
   await assert.rejects(() => browser.tabs(), /Connection lost|offline|unknown|failed|409/i)
-  const secondSecret = secondId.slice(3)
+  const secondSecret = secondId
   const second = createBrowser({ driverId: secondSecret }, { hubUrl: hub.url })
   assert.ok((await second.tabs()).tabs.some((item) => item.url === pageUrl))
   const cliRoot = await mkdtemp(join(tmpdir(), 'bro-relay-cli-'))
@@ -146,7 +146,7 @@ try {
   await writeFile(join(cliRoot, 'package.json'), '{"type":"module"}\n')
   // The copied SDK imports ../extension/protocol.js; provide that exact path.
   await mkdir(join(cliRoot, 'extension'))
-  for (const file of ['protocol.js', 'hub-url.js']) await cp(join(root, 'extension', file), join(cliRoot, 'extension', file))
+  for (const file of ['protocol.js', 'hub-url.js', 'relay-crypto.js']) await cp(join(root, 'extension', file), join(cliRoot, 'extension', file))
   const cliEnv = { ...process.env, BRO_RELAY_STATE_DIR: join(cliRoot, 'state') }
   const connected = await run(join(cliRoot, 'cli/index.js'), ['connect', secondId], { cwd: cliRoot, env: cliEnv })
   assert.equal(connected.code, 0, connected.stderr)
@@ -308,6 +308,7 @@ try {
   assert.equal(await page.locator('#result').textContent(), beforeStop, 'cancelled clicks must not run')
   await popup.locator('#remoteToggle').check()
   await waitFor(async () => /已连接/.test(await popup.locator('#remoteState').textContent()))
+  await assert.rejects(second.tabs(), error => error.code === 'transport_error' && error.payload.transportCode === 'session_expired')
   for (const job of [pending, queued]) {
     const result = await second.request('GET', `/api/tasks/${job.task.id}`)
     assert.equal(result.task.status, 'cancelled', `stop must cancel running and queued work: ${JSON.stringify(result.task)}`)

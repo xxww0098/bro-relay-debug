@@ -1617,7 +1617,13 @@ export function createAutomation({
         return await run(job, signal);
       }, ...args);
       jobOrigins.set(job.id, transport);
-      job.done.finally(() => jobOrigins.delete(job.id));
+      const abort = () => queue.cancel(job.id);
+      requestSignal?.addEventListener('abort', abort, { once: true });
+      if (requestSignal?.aborted) abort();
+      job.done.finally(() => {
+        jobOrigins.delete(job.id);
+        requestSignal?.removeEventListener('abort', abort);
+      });
       return job;
     };
     const u = new URL(path, "http://relay.local"),

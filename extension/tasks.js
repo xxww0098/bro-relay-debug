@@ -91,20 +91,20 @@ export function createTaskQueue({ limit = 100 } = {}) {
       controller: new AbortController(),
     };
     jobs.set(id, job);
+    // Queue time consumes the budget: a delayed operation must not run much later.
+    const timer = setTimeout(() => {
+      job.timedOut = true;
+      job.controller.abort();
+    }, timeoutMs);
     const previous = tails.get(tabId) || Promise.resolve();
     const done = previous
       .catch(() => {})
       .then(async () => {
-        let timer;
         try {
           if (job.cancelReason) throw new TaskError(job.cancelReason, "Task cancelled", 409);
           checkCancelled(job.controller.signal);
           job.status = "running";
           job.startedAt = Date.now();
-          timer = setTimeout(() => {
-            job.timedOut = true;
-            job.controller.abort();
-          }, timeoutMs);
           const observation = await run(job, job.controller.signal);
           checkCancelled(job.controller.signal);
           job.observation = observation;

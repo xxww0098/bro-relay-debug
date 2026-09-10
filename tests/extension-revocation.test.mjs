@@ -24,3 +24,18 @@ test('revocation fences requests still resolving a tab before close or task crea
     assert.equal(executor.activeTasks().length, 0);
   }
 });
+
+test('an aborted RPC cancels an already running browser task', async () => {
+  let entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const executor = createAutomation({
+    resolveTab: async () => 1,
+    send: async () => { entered(); return new Promise(() => {}); },
+  });
+  const request = new AbortController();
+  const pending = executor.request('POST', '/api/evaluate', { tabId: 't_example123', expression: 'document.title' }, 'remote', request.signal);
+  await started;
+  request.abort();
+  await assert.rejects(Promise.race([pending, new Promise((_, reject) => setTimeout(() => reject(new Error('task did not cancel')), 100))]), { code: 'task_cancelled' });
+  assert.equal(executor.activeTasks().length, 0);
+});

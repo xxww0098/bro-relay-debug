@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { parsePairing, deriveHubToken, createClient } from '../extension/relay-crypto.js';
 import { createRemoteControl } from '../extension/remote-control.js';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -32,20 +33,41 @@ function harness(initial = {}, storageOverride) {
     ws.open(); ws.message({ type: 'device.authenticated' });
     return done;
   }
-  return { control, sockets, requests, enable, saved: () => saved };
+  async function exchange(payload) {
+    const ws = sockets.at(-1), id = randomUUID();
+    ws.message({ type: 'rpc.request', id, payload });
+    await until(() => ws.frames.some(f => f.type === 'rpc.response' && f.id === id));
+    return { id, ...ws.frames.find(f => f.type === 'rpc.response' && f.id === id) };
+  }
+  async function rpc() {
+    const client = await createClient(parsePairing(control.status().deviceId));
+    const challenge = await exchange({ type: 'session.hello', hello: client.hello });
+    const { finish, session } = await client.finish(challenge.payload.challenge);
+    const ack = await exchange({ type: 'session.finish', finish });
+    await session.open(ack.payload.envelope);
+    const id = randomUUID();
+    const envelope = await session.seal(id, { kind: 'rpc', method: 'GET', path: '/api/tabs', deadline: Date.now()+30000 });
+    sockets.at(-1).message({ type: 'rpc.request', id, payload: { type: 'rpc', envelope } });
+    await until(() => sockets.at(-1).frames.some(f => f.id === id));
+    return session.open(sockets.at(-1).frames.find(f => f.id === id).payload.envelope);
+  }
+  return { control, sockets, requests, enable, exchange, rpc, saved: () => saved };
 }
 
 test('enable authenticates without a URL secret; off/on preserves ID and rotation revokes old socket', async t => {
   const h = harness(); t.after(() => h.control.dispose()); await h.control.ready;
   const first = await h.enable();
   assert.equal(first.connected, true);
-  assert.match(first.deviceId, /^br-[\w-]{43}$/);
-  const secret = first.deviceId.slice(3), old = h.sockets[0], oldMessage = old.onmessage;
+  assert.match(first.deviceId, /^br2\./);
+  const pairing = parsePairing(first.deviceId), secret = await deriveHubToken(pairing), old = h.sockets[0], oldMessage = old.onmessage;
   assert.equal(old.url.includes(secret), false);
   assert.equal(new URL(old.url).searchParams.get('routeId'), createHash('sha256').update(secret).digest('base64url').slice(0, 16));
   assert.deepEqual(old.frames[0], { type: 'device.auth', secret });
-  old.message({ type: 'rpc.request', id: 'accepted', method: 'GET', path: '/api/tabs' });
-  await tick(); assert.equal(h.requests.length, 1);
+  old.message({ type: 'rpc.request', id: 'plaintext', method: 'GET', path: '/api/tabs' });
+  await tick(); assert.equal(h.requests.length, 0);
+  assert.equal((await h.rpc()).payload.body.ok, true);
+  assert.equal(h.requests.length, 1);
+  assert.equal(JSON.stringify(old.frames).includes(pairing.secret), false);
   await h.control.set({ enabled: false });
   oldMessage({ data: JSON.stringify({ type: 'rpc.request', id: 'stale' }) });
   assert.equal(h.requests.length, 1);

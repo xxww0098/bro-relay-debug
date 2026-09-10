@@ -27,21 +27,14 @@ test('hub only claims the secret-derived route and does not accept another socke
   assert.equal(device.deviceSocket, null);
 });
 
-test('losing an action request cancels its exact task and forbids automatic replay', async () => {
-  const frames = [];
-  const pending = new Map();
-  const signal = new AbortController();
-  const result = sendRpc({ send: (frame) => frames.push(JSON.parse(frame)) }, pending,
-    { id: 'request1', method: 'POST', path: '/api/actions', body: { actions: [{ type: 'click' }] } },
-    { signal: signal.signal });
+test('aborting opaque RPC releases pending without inventing browser commands', async () => {
+  const frames = [], pending = new Map(), signal = new AbortController();
+  const payload = { type: 'rpc', envelope: { ciphertext: 'opaque' } };
+  const result = sendRpc({ send: frame => frames.push(JSON.parse(frame)) }, pending,
+    { id: 'request1', payload }, { signal: signal.signal });
   signal.abort();
-  await assert.rejects(result, error => {
-    assert.equal(error.retryable, false);
-    assert.equal(error.taskId, frames[0].body.taskId);
-    assert.equal(error.cancellationRequested, true);
-    return true;
-  });
-  assert.equal(frames[1].path, `/api/tasks/${frames[0].body.taskId}/cancel`);
+  await assert.rejects(result, { code: 'request_cancelled', retryable: false });
+  assert.deepEqual(frames, [{ type: 'rpc.request', id: 'request1', payload }]);
   assert.equal(pending.size, 0);
 });
 
@@ -49,7 +42,7 @@ function rpcRequest(body) {
   return new Request('https://device.local/v1/rpc', {
     method: 'POST',
     headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ routeId, method: 'GET', path: '/api/capabilities', ...body }),
+    body: JSON.stringify({ routeId, id: 'request1', timeoutMs: 30000, payload: { type: 'rpc', envelope: { ciphertext: 'opaque-request' } }, ...body }),
   });
 }
 
@@ -90,7 +83,7 @@ test('a stale socket that answers ping still receives the original RPC', async (
       }
       if (msg.type === 'rpc.request') {
         queueMicrotask(() => device.handleDeviceMessage(socket, JSON.stringify({
-          type: 'rpc.response', id: msg.id, status: 200, body: { ok: true, protocolVersion: 2 },
+          type: 'rpc.response', id: msg.id, payload: { type: 'rpc.result', envelope: { ciphertext: 'opaque-response' } },
         })));
       }
     },
@@ -100,7 +93,8 @@ test('a stale socket that answers ping still receives the original RPC', async (
   device.lastSeen = new Date(Date.now() - 60_000).toISOString();
   const response = await device.handleRpc(rpcRequest());
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { ok: true, protocolVersion: 2 });
+  assert.deepEqual(await response.json(), { ok: true, payload: { type: 'rpc.result', envelope: { ciphertext: 'opaque-response' } } });
+  assert.equal(sent[1].payload.envelope.ciphertext, 'opaque-request');
   assert.equal(sent[0]?.type, 'device.ping');
   assert.equal(sent[1]?.type, 'rpc.request');
   assert.equal(device.deviceSocket, socket);
@@ -117,7 +111,7 @@ test('a freshly seen socket skips the ping and forwards the RPC', async () => {
       sent.push(msg);
       if (msg.type === 'rpc.request') {
         queueMicrotask(() => device.handleDeviceMessage(socket, JSON.stringify({
-          type: 'rpc.response', id: msg.id, status: 200, body: { ok: true },
+          type: 'rpc.response', id: msg.id, payload: { type: 'rpc.result', envelope: { ciphertext: 'opaque-response' } },
         })));
       }
     },
