@@ -52,6 +52,36 @@ function harness({ createPromise, capturePromise, focusPromise } = {}) {
   return { takeover, source, tabs, calls, onStop };
 }
 
+test('preview payload carries a live pointer without waiting for the next screenshot', async t => {
+  const h = harness();
+  t.after(() => h.takeover.stopAll());
+  const lease = await h.takeover.enter(h.source.id, new AbortController().signal);
+  const previewId = [...h.tabs.keys()].find(id => id !== h.source.id);
+  h.takeover.setPointer(h.source.id, { x: 120, y: 40, label: '点击', kind: 'click', rect: { x: 100, y: 20, width: 40, height: 40 } });
+  h.takeover.setViewport(h.source.id, { width: 800, height: 600 });
+  const preview = await h.takeover.read(previewId);
+  assert.equal(preview.pointer.x, 120);
+  assert.equal(preview.pointer.y, 40);
+  assert.equal(preview.pointer.label, '点击');
+  assert.equal(preview.pointer.kind, 'click');
+  assert.deepEqual(preview.viewport, { width: 800, height: 600 });
+  h.takeover.setPointer(h.source.id, null);
+  assert.equal((await h.takeover.read(previewId)).pointer, null);
+  await h.takeover.leave(lease);
+});
+
+test('leaveSource closes the preview and drops the pointer', async t => {
+  const h = harness();
+  t.after(() => h.takeover.stopAll());
+  await h.takeover.enter(h.source.id, new AbortController().signal);
+  const previewId = [...h.tabs.keys()].find(id => id !== h.source.id);
+  h.takeover.setPointer(h.source.id, { x: 1, y: 2, kind: 'click' });
+  assert.equal((await h.takeover.read(previewId)).pointer.x, 1);
+  await h.takeover.leaveSource(h.source.id);
+  assert.equal((await h.takeover.read(previewId)).active, false);
+  await h.takeover.leaveSource(h.source.id);
+});
+
 test('enter captures the source, creates an adjacent preview, and activates it only if source stayed active', async t => {
   const h = harness();
   t.after(() => h.takeover.stopAll());

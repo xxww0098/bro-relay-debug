@@ -41,4 +41,5 @@ export const isAutomationPath = (path) =>
     "/api/tabs/claim",
     "/api/tabs/release",
     "/api/tabs/handoff",
+    "/api/release",
   ].includes(path) || path.startsWith("/api/tasks/");

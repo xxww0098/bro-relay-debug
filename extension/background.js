@@ -321,17 +321,27 @@ const takeover = createTakeover({
     ? remoteCdp(tabId, 'Emulation.setFocusEmulationEnabled', { enabled }, undefined, signal)
     : chrome.debugger.sendCommand({ tabId }, 'Emulation.setFocusEmulationEnabled', { enabled }),
   capture: async (tabId, signal) => {
+    await automation?.dismissOverlay(tabId);
     const frame = await remoteCdp(tabId, 'Page.captureScreenshot', { format: 'jpeg', quality: 70, captureBeyondViewport: false }, undefined, signal);
     return `data:image/jpeg;base64,${frame.data}`;
+  },
+  measure: async (tabId, signal) => {
+    const metrics = await remoteCdp(tabId, 'Page.getLayoutMetrics', {}, undefined, signal);
+    const view = metrics?.cssLayoutViewport || metrics?.layoutViewport;
+    const width = Number(view?.clientWidth), height = Number(view?.clientHeight);
+    return width > 0 && height > 0 ? { width, height } : null;
   },
   onStop: () => control.set({ enabled: false }),
 });
 const takeoverReady = takeover.recover();
-const automation = createAutomation({
+let automation = createAutomation({
   runtimeInfo: executorInfo, publicTabId: publicTabIdFor, resolveTab: resolveRemoteTabId,
   send: remoteCdp,
   beginTask: takeover.enter,
   endTask: takeover.leave,
+  endPreview: takeover.leaveSource,
+  onPointer: (tabId, pointer) => takeover.setPointer(tabId, pointer),
+  onViewport: (tabId, viewport) => takeover.setViewport(tabId, viewport),
   createTab: async url => {
     if (!isAttachableUrl(url)) throw new Error('Only HTTP(S) and about:blank are supported');
     if (!control.isConnected()) throw new Error('Remote control stopped');
@@ -351,16 +361,34 @@ const automation = createAutomation({
 });
 const control = createRemoteControl({
   storage: chrome.storage.local, hubUrl: HUB_URL,
-  hello: { version: chrome.runtime.getManifest().version, deviceName: 'Bro Relay Debug', capabilities: FEATURES, executor: executorInfo() },
+  hello: { version: chrome.runtime.getManifest().version, protocolVersion: PROTOCOL_VERSION, deviceName: 'Bro Relay Debug', capabilities: FEATURES, executor: executorInfo() },
   onRequest: (message, signal) => executeRemoteApi(message.method, message.path, message.body, signal),
   onStop: stopControl,
   onStatus: state => {
+    if (state.enabled) void ensureOffscreen();
+    else void chrome.offscreen?.closeDocument?.().catch(() => {});
     void chrome.action.setBadgeText({ text: state.connected ? 'ON' : state.enabled ? '…' : '' });
     void chrome.action.setBadgeBackgroundColor({ color: state.connected ? '#318244' : '#b7771a' });
     void chrome.runtime.sendMessage({ type: 'remoteStatusChanged', ...state }).catch(() => {});
   },
 });
+async function ensureOffscreen() {
+  if (!chrome.offscreen?.createDocument) return;
+  try {
+    const existing = await chrome.runtime.getContexts?.({ contextTypes: ['OFFSCREEN_DOCUMENT'] }) ?? [];
+    if (existing.length) return;
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['WORKERS'],
+      justification: 'Keep the hub WebSocket alive while the service worker is idle',
+    });
+  } catch { /* Already created, or this browser has no offscreen documents. */ }
+}
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (message?.type === 'bro-keepalive') {
+    void control.reconnect();
+    return false;
+  }
   if (message?.type === 'getTakeoverPreview') {
     takeover.read(sender.tab?.id).then(respond);
     return true;
@@ -403,6 +431,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
 chrome.alarms.create('bro-keepalive', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(async ({ name }) => {
   if (name !== 'bro-keepalive') return;
+  if (control.status().enabled) await ensureOffscreen();
   automation.sessions.sweep();
   await control.reconnect();
   for (const [tabId, state] of tabs) {

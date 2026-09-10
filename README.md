@@ -93,11 +93,12 @@ BRO_RELAY_HUB_URL=https://bro-relay-debug-hub.YOUR_SUBDOMAIN.workers.dev
 然后构建并安装技能：
 
 ```sh
-npm run build
+./build.sh
 npm run skill:install
 ```
 
-构建输出会显示本次使用的 Hub 地址，并生成 `dist/bro-relay-debug-extension.zip`。
+版本取自 `package.json`，自动同步到扩展和技能。配置优先级为进程环境变量、`.env`、`.env.example`。
+构建输出会显示版本和本次使用的 Hub 地址，并生成 `dist/bro-relay-debug-extension-<版本号>.zip`。
 同一地址会写入 CLI、扩展配置及扩展域名权限。构建时的进程环境变量优先于 `.env`；
 如果输出的地址不是预期值，检查终端是否另设了 `BRO_RELAY_HUB_URL`。
 
@@ -106,7 +107,7 @@ npm run skill:install
 
 ### 6. 安装扩展并验证完整链路
 
-将 `dist/bro-relay-debug-extension.zip` 交给用户，解压后在
+将 `dist/bro-relay-debug-extension-<版本号>.zip` 交给用户，解压后在
 `chrome://extensions` 或 `edge://extensions` 开启开发者模式，选择“加载解压缩的扩展”。
 打开扩展的滑动开关，等待“已连接”，复制驱动 ID 提供给装有
 [bro-connect](skills/bro-connect/SKILL.md) 的代理。
@@ -127,12 +128,13 @@ CLI 已随 `skills/bro-connect/scripts/runtime` 内置；代理电脑只需 Node
 直接使用 CLI 时，运行 `node cli/index.js --help` 查看当前命令。
 连接后先列出标签页，再用返回的标签页 ID 操作指定页面。
 
-页面内的操作提示参考 [ego-lite 的指针高亮与动作说明](https://github.com/citrolabs/ego-lite/blob/main/package/ego-browser/src/driver/pointer.ts)：
+操作提示参考 [ego-lite 的指针高亮与动作说明](https://github.com/citrolabs/ego-lite/blob/main/package/ego-browser/src/driver/pointer.ts)：
 平滑移动的位置标记和短动作标签只用于展示代理正在操作的位置，不接收鼠标事件，也不代表业务操作成功。
+操作员在只读预览层上看到指针；后台原页的提示会被截图丢掉，避免写进代理证据。
+代理结束工作时发出 `release`，指针和预览一起消失；`disconnect` 只忘本地凭证，并不结束浏览器上的控制。
 判断结果应读取操作返回值和新的页面状态。点击会在限定时间内等待目标可用并停止移动；
 超时后应重新观察页面，不要盲目重放操作。
-提示在最后一次操作后短暂保留，截图前会先移除，不会出现在代理读取的画面里。
-扩展面板的“停止并接管”会取消正在执行和排队的任务，并关闭远程控制；再次启用沿用原驱动 ID。
+关闭扩展面板的远程控制开关会取消正在执行和排队的任务，并关闭远程控制；再次启用沿用原驱动 ID。
 动作批次和脚本执行期间会打开只读截图预览，原页在后台执行；预览不转发鼠标、键盘或滚轮输入。
 完成、取消或断线后自动关闭预览并返回原页；若你已切到其他标签页，则保留你的选择。
 预览页也提供“停止并接管”。只读查询不会切换页面。

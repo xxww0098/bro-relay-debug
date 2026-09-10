@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { createBrowser, parseDriverId, status, RelayError } from './sdk.js';
+import { createBrowser, handshake, parseDriverId, RelayError } from './sdk.js';
 
 const directory = process.env.BRO_RELAY_STATE_DIR || path.join(os.homedir(), '.bro-relay-debug');
 const connectionFile = path.join(directory, 'connection.json');
@@ -15,6 +15,7 @@ const usage = `bro-relay-debug <command> [--tab ID]
 connect <driver-id> | connect --stdin  Verify and save a connection
 status | doctor                      Check saved connection and capabilities
 disconnect                           Remove the local saved credential
+release                              Dismiss the pointer and close the control preview
 tabs                                 List controllable pages
 tabs new URL | tabs close | tabs focus
 state | read | observe [--diff] [--cursor CURSOR]
@@ -123,26 +124,24 @@ async function main() {
   if (command === 'connect') {
     const parsed = parseDriverId(flags.stdin ? await readDriverId() : args[0]);
     activeSecret = parsed.driverId;
-    const browser = createBrowser(parsed);
-    const capabilities = await browser.capabilities();
-    if (capabilities.protocolVersion !== 2) throw new RelayError({ code: 'incompatible_extension', message: 'Install the matching Bro Relay Debug extension', status: 409 });
-    const result = await browser.tabs();
+    const verified = await handshake(parsed);
     await saveConnection(parsed);
-    return output({ ok: true, connected: true, protocolVersion: capabilities.protocolVersion, tabs: result.tabs?.length ?? 0 });
+    return output({ ok: true, connected: true, protocolVersion: verified.protocolVersion, features: verified.features });
   }
   if (command === 'disconnect') {
     await fs.rm(connectionFile, { force: true });
     return output({ ok: true, disconnected: true });
   }
-  const commands = ['status', 'doctor', 'tabs', 'state', 'read', 'observe', 'find', 'extract', 'screenshot', 'eval', 'actions', 'navigate', 'click', 'fill', 'type', 'key', 'scroll', 'wait', 'network', 'console', 'task', 'raw'];
+  const commands = ['status', 'doctor', 'tabs', 'release', 'state', 'read', 'observe', 'find', 'extract', 'screenshot', 'eval', 'actions', 'navigate', 'click', 'fill', 'type', 'key', 'scroll', 'wait', 'network', 'console', 'task', 'raw'];
   if (!commands.includes(command)) invalid(`Unknown command. Run --help.`);
   const saved = await connection();
-  const browser = createBrowser(saved);
   if (command === 'status' || command === 'doctor') {
-    const current = await status(saved);
-    const capabilities = await browser.capabilities();
-    if (capabilities.protocolVersion !== 2) throw new RelayError({ code: 'incompatible_extension', message: 'Extension protocol is incompatible', status: 409 });
-    return output({ ok: true, connected: current.connected, protocolVersion: capabilities.protocolVersion, features: capabilities.features });
+    const verified = await handshake(saved);
+    return output({ ok: true, connected: verified.connected, protocolVersion: verified.protocolVersion, features: verified.features });
+  }
+  const browser = createBrowser(saved);
+  if (command === 'release') {
+    return output(await browser.request('POST', '/api/release', { tabId: (await selectTab(browser, flags.tab)).id }));
   }
   if (command === 'tabs') {
     if (!args.length) return output(await browser.tabs());

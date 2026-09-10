@@ -15,12 +15,10 @@ h1 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: -.3px; }
 .switch:checked::before { transform: translateX(20px); }
 .switch:disabled, button:disabled { cursor: wait; opacity: .6; }
 :focus-visible { outline: 3px solid #549568; outline-offset: 4px; }
-.takeover-stop { margin: -4px 0 20px; }
-.takeover-stop button { margin-top: 0; }
 #remoteDetails { border-top: 1px solid #dee5df; padding-top: 20px; }
 .id-heading { display: flex; justify-content: space-between; margin-bottom: 9px; font-size: 12px; }
 .id-heading label { font-weight: 600; }
-.id-heading span, .hint { color: #647168; }
+.hint { color: #647168; }
 textarea { display: block; width: 100%; padding: 12px; resize: none; border: 1px solid #d6e1d8; border-radius: 8px; background: #edf3ee; color: #244e34; font: 12px/1.65 ui-monospace, "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; cursor: copy; }
 .hint { font-size: 12px; line-height: 1.6; margin: 8px 0 0; }
 button { width: 100%; min-height: 40px; padding: 10px 14px; margin-top: 20px; border: 1px solid #b7c4ba; border-radius: 8px; color: inherit; background: transparent; font: inherit; font-size: 13px; font-weight: 550; cursor: pointer; transition: background 160ms ease; }
@@ -29,7 +27,7 @@ button:hover { background: #e9eee9; }
 .status.error { color: #a12c27; }
 @media (prefers-color-scheme: dark) {
   :root { background: #17211b; color: #e7ede9; }
-  #remoteState, .hint, .id-heading span, .status { color: #b0beb4; }
+  #remoteState, .hint, .status { color: #b0beb4; }
   #remoteState.connected { color: #a7d2b2; }
   #remoteDetails { border-color: #36483c; }
   textarea { background: #202f25; border-color: #425b49; color: #c6e1ce; }
@@ -39,3 +37,11 @@ button:hover { background: #e9eee9; }
   .switch:checked { background: #66a67b; border-color: #66a67b; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before { transition: none !important; } }
+
+.id-heading { align-items: center; }
+#copyDeviceId { width: auto; min-height: 32px; padding: 4px 8px; margin: -4px 0; font-size: 12px; }
+
+#extensionVersion { margin-left: auto; flex: none; font-size: 12px; color: #647168; }
+@media (prefers-color-scheme: dark) { #extensionVersion { color: #b0beb4; } }
+
+.status:empty { display: none; }

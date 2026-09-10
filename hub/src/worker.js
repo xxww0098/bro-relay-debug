@@ -1,7 +1,11 @@
-import { sendRpc } from "./rpc.js";
+import { isTaskRequest } from "../../extension/protocol.js";
+import { pingSocket, sendRpc } from "./rpc.js";
 const MAX_BODY_SIZE = 128 * 1024;
 const RPC_TIMEOUT_MS = 30_000;
+const READ_RPC_TIMEOUT_MS = 8_000;
 const DEVICE_AUTH_TIMEOUT_MS = 5_000;
+const STALE_MS = 22_000;
+const PING_TIMEOUT_MS = 2_000;
 
 function jsonResponse(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
@@ -88,6 +92,8 @@ export class BrowserRelayDevice {
     // is connected (the DO stays resident on the open WS); once it drops and the DO
     // evicts, all state is gone. No storage writes → no zombie routes to clean up.
     this.secretHash = null;
+    this.staleMs = STALE_MS;
+    this.pingTimeoutMs = PING_TIMEOUT_MS;
   }
 
   async fetch(request) {
@@ -201,11 +207,9 @@ export class BrowserRelayDevice {
       return;
     }
 
-    if (msg.type === "rpc.response" && msg.id) {
+    if ((msg.type === "rpc.response" || msg.type === "device.pong") && msg.id) {
       const pending = this.pending.get(msg.id);
       if (!pending) return;
-      clearTimeout(pending.timer);
-      this.pending.delete(msg.id);
       pending.resolve(msg);
     }
   }
@@ -251,11 +255,38 @@ export class BrowserRelayDevice {
     }
   }
 
-  sendRpcToDevice(requestBody, signal) {
-    if (!this.deviceSocket || this.deviceSocket.readyState !== WebSocket.OPEN) {
+  isSocketLive() {
+    return !!this.deviceSocket && this.deviceSocket.readyState === WebSocket.OPEN;
+  }
+
+  isLastSeenStale() {
+    const seen = Date.parse(this.lastSeen || "");
+    return !Number.isFinite(seen) || Date.now() - seen > this.staleMs;
+  }
+
+  dropDevice(reason = "stale") {
+    const socket = this.deviceSocket;
+    if (!socket) return;
+    try { socket.close(4002, reason); } catch {}
+    this.handleDeviceClose(socket);
+  }
+
+  async sendRpcToDevice(requestBody, signal) {
+    if (!this.isSocketLive()) {
       throw errorPayload("remote_device_offline", "Remote Browser Relay device is offline", { status: 409, retryable: true });
     }
-    return sendRpc(this.deviceSocket,this.pending,requestBody,{signal,timeoutMs:RPC_TIMEOUT_MS});
+    if (this.isLastSeenStale()) {
+      try {
+        await pingSocket(this.deviceSocket, this.pending, { signal, timeoutMs: this.pingTimeoutMs });
+      } catch {
+        this.dropDevice("stale");
+        throw errorPayload("remote_device_offline", "Remote Browser Relay device is offline", { status: 409, retryable: true });
+      }
+    }
+    const path = new URL(requestBody.path, "http://relay.local").pathname;
+    const timeoutMs = isTaskRequest(requestBody.method, path) || path === "/api/screenshot"
+      ? RPC_TIMEOUT_MS : READ_RPC_TIMEOUT_MS;
+    return sendRpc(this.deviceSocket, this.pending, requestBody, { signal, timeoutMs });
   }
 
   async handleStatus(request) {

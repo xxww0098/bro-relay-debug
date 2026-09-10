@@ -24,6 +24,11 @@
       </div>
       <div id="imageFrame" class="image-frame" aria-live="polite">
         <img id="previewImage" alt="远程页面截图" draggable="false" hidden>
+        <div id="pointerLayer" class="pointer-layer" hidden>
+          <div class="target" hidden></div>
+          <div class="cursor" aria-hidden="true"></div>
+          <div class="label" hidden></div>
+        </div>
         <p id="emptyState">正在获取远程画面…</p>
       </div>
       <p id="updateStatus" class="status" role="status" aria-live="polite">代理在后台执行，画面将自动更新。</p>

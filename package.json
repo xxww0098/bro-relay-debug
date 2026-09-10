@@ -1,6 +1,6 @@
 {
   "name": "bro-relay-debug",
-  "version": "0.1.1",
+  "version": "0.1.4",
   "description": "Remote browser debugging through a driver ID, without a local daemon",
   "type": "module",
   "license": "MIT",

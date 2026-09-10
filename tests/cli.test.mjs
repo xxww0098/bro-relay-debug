@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { createBrowser, routeIdFor, parseDriverId } from '../cli/sdk.js';
+import { createBrowser, handshake, routeIdFor, parseDriverId } from '../cli/sdk.js';
 import { filterNodes } from '../cli/index.js';
 
 function mockHub(handler) {
@@ -70,6 +70,78 @@ test('lost responses retain the original task ID and send cancellation without r
   });
   assert.equal(frames.length, 2);
   assert.equal(frames[1].path, `/api/tasks/${frames[0].body.taskId}/cancel`);
+});
+
+test('handshake trusts a fresh hub hello and does not round-trip through the device', async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    if (String(url).includes('/v1/status/')) {
+      return new Response(JSON.stringify({
+        ok: true, connected: true, lastSeen: new Date().toISOString(),
+        hello: { protocolVersion: 2, capabilities: ['tabs'], executor: { protocolVersion: 2, features: ['tabs'] } },
+      }));
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+  const result = await handshake({ driverId: 'a'.repeat(24) }, { fetch: fetchImpl, hubUrl: 'http://127.0.0.1:9' });
+  assert.equal(result.connected, true);
+  assert.equal(result.protocolVersion, 2);
+  assert.deepEqual(result.features, ['tabs']);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /\/v1\/status\//);
+});
+
+test('handshake does not retry a device RPC timeout', async () => {
+  let n = 0;
+  const fetchImpl = async (url) => {
+    n += 1;
+    if (String(url).includes('/v1/status/')) {
+      return new Response(JSON.stringify({
+        ok: true, connected: true, lastSeen: new Date(Date.now() - 60_000).toISOString(), hello: null,
+      }));
+    }
+    return new Response(JSON.stringify({
+      ok: false, code: 'remote_request_timeout', message: 'Remote device did not respond before timeout', status: 504, retryable: true,
+    }), { status: 504 });
+  };
+  await assert.rejects(
+    handshake({ driverId: 'd'.repeat(24) }, { fetch: fetchImpl, hubUrl: 'http://127.0.0.1:9' }),
+    error => error.code === 'remote_request_timeout',
+  );
+  assert.equal(n, 2);
+});
+
+test('handshake retries a retryable offline device then fails', async () => {
+  let n = 0;
+  const fetchImpl = async () => {
+    n += 1;
+    return new Response(JSON.stringify({ ok: true, connected: false, lastSeen: null }));
+  };
+  await assert.rejects(
+    handshake({ driverId: 'c'.repeat(24) }, { fetch: fetchImpl, hubUrl: 'http://127.0.0.1:9', retryDelayMs: 0 }),
+    error => error.code === 'remote_device_offline',
+  );
+  assert.equal(n, 3);
+});
+
+test('handshake probes capabilities only when the hello is missing or stale', async () => {
+  const calls = [];
+  const fetchImpl = async (url, request) => {
+    calls.push(String(url));
+    if (String(url).includes('/v1/status/')) {
+      return new Response(JSON.stringify({
+        ok: true, connected: true, lastSeen: new Date(Date.now() - 60_000).toISOString(), hello: null,
+      }));
+    }
+    const frame = JSON.parse(request.body);
+    assert.equal(frame.path, '/api/capabilities');
+    return new Response(JSON.stringify({ ok: true, protocolVersion: 2, features: ['observe'] }));
+  };
+  const result = await handshake({ driverId: 'b'.repeat(24) }, { fetch: fetchImpl, hubUrl: 'http://127.0.0.1:9' });
+  assert.equal(result.protocolVersion, 2);
+  assert.deepEqual(result.features, ['observe']);
+  assert.equal(calls.length, 2);
 });
 
 test('find filters accessible names before truncating and returns actionable refs', () => {

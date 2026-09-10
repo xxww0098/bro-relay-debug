@@ -1,22 +1,39 @@
 import { checkCancelled } from './tasks.js';
 
 // Preview tabs contain pixels only. Browser input is never forwarded to the source.
-export function createTakeover({ tabs, previewUrl, capture, onStop, setFocus = async () => {} }) {
+// The operator-facing pointer is drawn on the preview itself: a background
+// page throttles CSS animation, and screenshots are too slow to look like a mouse.
+export function createTakeover({ tabs, previewUrl, capture, onStop, setFocus = async () => {}, measure } = {}) {
   const sources = new Map(), previews = new Map();
+  function live(sourceId) {
+    const lease = sources.get(sourceId);
+    return lease && !lease.closing ? lease : null;
+  }
+  async function snapshot(lease, signal) {
+    const image = await capture(lease.sourceId, signal);
+    let viewport = lease.viewport;
+    if (measure) {
+      try {
+        const next = await measure(lease.sourceId, signal);
+        if (next?.width > 0 && next?.height > 0) viewport = { width: next.width, height: next.height };
+      } catch { /* Keep the last known CSS viewport. */ }
+    }
+    return { image, viewport };
+  }
   async function refresh(lease) {
     if (lease.closing || lease.capturing) return;
     lease.capturing = true;
     try {
       if (!(await tabs.get(lease.previewId)).active) return;
-      const image = await capture(lease.sourceId, lease.controller.signal);
-      if (!lease.closing) Object.assign(lease, { image, capturedAt: Date.now(), error: undefined });
+      const shot = await snapshot(lease, lease.controller.signal);
+      if (!lease.closing) Object.assign(lease, { ...shot, capturedAt: Date.now(), error: undefined });
     } catch {
       if (!lease.closing) lease.error = '画面暂未更新';
     } finally { lease.capturing = false; }
   }
   async function enter(sourceId, signal) {
     checkCancelled(signal);
-    const lease = { sourceId, closing: false, controller: new AbortController() };
+    const lease = { sourceId, closing: false, controller: new AbortController(), pointer: null, viewport: null };
     const interrupted = signal ? AbortSignal.any([signal, lease.controller.signal]) : lease.controller.signal;
     if (sources.has(sourceId)) throw new Error('Page already has a running takeover');
     sources.set(sourceId, lease);
@@ -32,11 +49,13 @@ export function createTakeover({ tabs, previewUrl, capture, onStop, setFocus = a
       const cancelled = new Promise((_, reject) => { rejectCapture = () => reject(new Error('Takeover stopped')); });
       interrupted.addEventListener('abort', rejectCapture, { once: true });
       try {
-        lease.image = await Promise.race([(async () => {
+        const shot = await Promise.race([(async () => {
           await setFocus(sourceId, true, interrupted);
           check();
-          return capture(sourceId, interrupted);
+          return snapshot(lease, interrupted);
         })(), cancelled]);
+        lease.image = shot.image;
+        if (shot.viewport) lease.viewport = shot.viewport;
       }
       finally { interrupted.removeEventListener('abort', rejectCapture); }
       lease.capturedAt = Date.now();
@@ -59,6 +78,7 @@ export function createTakeover({ tabs, previewUrl, capture, onStop, setFocus = a
   function leave(lease) {
     if (lease.finished) return lease.finished;
     lease.closing = true;
+    lease.pointer = null;
     lease.controller.abort();
     clearInterval(lease.timer);
     lease.finished = (async () => {
@@ -81,8 +101,22 @@ export function createTakeover({ tabs, previewUrl, capture, onStop, setFocus = a
       if (!previews.has(previewId)) await Promise.allSettled([...sources.values()].map(lease => lease.ready));
       const lease = previews.get(previewId);
       return lease && !lease.closing
-        ? { active: true, title: lease.title, image: lease.image, capturedAt: lease.capturedAt, error: lease.error }
+        ? { active: true, title: lease.title, image: lease.image, capturedAt: lease.capturedAt, error: lease.error, pointer: lease.pointer, viewport: lease.viewport }
         : { active: false };
+    },
+    setPointer(sourceId, pointer) {
+      const lease = live(sourceId);
+      if (!lease) return;
+      lease.pointer = pointer && Number.isFinite(pointer.x) && Number.isFinite(pointer.y)
+        ? { ...pointer, at: Date.now() } : null;
+    },
+    setViewport(sourceId, viewport) {
+      const lease = live(sourceId);
+      if (lease && viewport?.width > 0 && viewport?.height > 0) lease.viewport = { width: viewport.width, height: viewport.height };
+    },
+    leaveSource: sourceId => {
+      const lease = sources.get(sourceId);
+      return lease ? leave(lease) : Promise.resolve();
     },
     isPreview: tabId => previews.has(tabId),
     previewFor: sourceId => sources.get(sourceId)?.previewId,

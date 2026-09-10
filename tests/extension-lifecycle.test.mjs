@@ -80,3 +80,27 @@ test('disable supersedes pending authentication and a stale persisted enabled re
   assert.equal(other.control.status().enabled, false);
   assert.equal(other.sockets.length, 0);
 });
+
+test('device ping is answered without executing an RPC, and reconnect heartbeats a live socket', async t => {
+  const h = harness(); t.after(() => h.control.dispose()); await h.control.ready;
+  await h.enable();
+  const ws = h.sockets[0];
+  ws.frames.length = 0;
+  ws.message({ type: 'device.ping', id: 'ping_1' });
+  assert.deepEqual(ws.frames, [{ type: 'device.pong', id: 'ping_1' }]);
+  assert.equal(h.requests.length, 0);
+
+  ws.frames.length = 0;
+  await h.control.reconnect();
+  assert.equal(h.sockets.length, 1);
+  assert.equal(ws.frames[0]?.type, 'device.hello');
+
+  ws.send = () => { throw new Error('socket dead'); };
+  const reconnecting = h.control.reconnect();
+  await until(() => h.sockets.length === 2);
+  h.sockets[1].open();
+  h.sockets[1].message({ type: 'device.authenticated' });
+  await reconnecting;
+  assert.equal(h.control.isConnected(), true);
+  assert.equal(h.sockets[0].readyState, 3);
+});

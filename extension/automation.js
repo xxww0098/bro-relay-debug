@@ -136,6 +136,9 @@ export function createAutomation({
   focusTab,
   beginTask,
   endTask,
+  endPreview,
+  onPointer,
+  onViewport,
   runtimeInfo = () => ({}),
   publicTabId = (id) => id,
 }) {
@@ -1099,23 +1102,27 @@ export function createAutomation({
     });
     await cdp(tabId, "Input.dispatchKeyEvent", { type: "keyUp", ...base });
   }
-  async function actionOverlay(tabId, expression, preserveCancellation = true) {
+  async function actionOverlay(tabId, spec, preserveCancellation = true) {
+    const payload = typeof spec === "string" ? { expression: spec } : spec;
+    if (payload.pointer) onPointer?.(tabId, payload.pointer);
     try {
-      const result = await evaluate(tabId, expression);
+      const result = await evaluate(tabId, payload.expression);
       overlayDrawnAt.set(tabId, Date.now());
       if (result && result.ok === false) overlayFailures.set(tabId, result.error);
+      if (result?.viewport) onViewport?.(tabId, result.viewport);
     } catch (error) {
       if (preserveCancellation && error?.code === "task_cancelled") throw error;
     }
   }
   // The hint exists for the operator watching the browser; it must never land in
-  // the pixels handed back as evidence.
-  async function dismissOverlay(tabId) {
-    if (Date.now() - (overlayDrawnAt.get(tabId) || 0) > OVERLAY_LIFETIME_MS.max + 250)
+  // the pixels handed back as evidence. Preview draws its own cursor, so a
+  // screenshot dismiss must not clear that pointer.
+  async function dismissOverlay(tabId, { force = false } = {}) {
+    if (!force && Date.now() - (overlayDrawnAt.get(tabId) || 0) > OVERLAY_LIFETIME_MS.max + 250)
       return;
     overlayDrawnAt.delete(tabId);
     try {
-      await evaluate(tabId, dismissActionOverlay());
+      await evaluate(tabId, dismissActionOverlay().expression);
     } catch {}
   }
   const isRefTarget = (target) =>
@@ -1491,6 +1498,7 @@ export function createAutomation({
               button: "left",
               buttons: 1,
             });
+            onPointer?.(tabId, { x: current.x, y: current.y, kind: "drag", label: "拖动" });
           }
         }
       } finally {
@@ -1619,6 +1627,8 @@ export function createAutomation({
           checkCancelled(signal);
           return await run(job, signal);
         } finally {
+          onPointer?.(tabId, null);
+          await dismissOverlay(tabId, { force: true });
           if (preview) await endTask(preview);
         }
       }, ...args);
@@ -1760,6 +1770,13 @@ export function createAutomation({
       await closeTab(tabId);
       sessions.forget(tabId);
       return { ok: true };
+    }
+    if (p === "/api/release" && method === "POST") {
+      const tabId = await resolve(body.tabId);
+      onPointer?.(tabId, null);
+      await dismissOverlay(tabId, { force: true });
+      await endPreview?.(tabId);
+      return { ok: true, released: true, tabId: publicTabId(tabId) };
     }
     if (p === "/api/observe" || p === "/api/read") {
       const tabId = await resolve(options.tabId);

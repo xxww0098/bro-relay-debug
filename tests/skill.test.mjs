@@ -14,5 +14,6 @@ test('copied skill runs without the source checkout or npm installation', async 
     const result = JSON.parse(execFileSync(process.execPath, [join(temporary, 'scripts/bro.mjs'), '--help'], { cwd: temporary, encoding: 'utf8' }));
     assert.equal(result.ok, true);
     assert.match(result.usage, /connect --stdin/);
+    assert.match(result.usage, /release/);
   } finally { await rm(temporary, { recursive: true, force: true }); }
 });

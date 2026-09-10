@@ -18,6 +18,15 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
     rejectConnect = undefined;
     connecting = undefined;
   }
+  function sendHello() {
+    if (!socket) throw new Error('not connected');
+    socket.send(JSON.stringify({ type: 'device.hello', ...hello }));
+  }
+  function heartbeat() {
+    if (!authenticated || !socket) return false;
+    try { sendHello(); return true; }
+    catch { return false; }
+  }
   function schedule(revision) {
     if (revision !== generation || !config.remoteControlEnabled || reconnectTimer) return;
     const delay = Math.min(1000 * 2 ** attempt++, 15000);
@@ -37,7 +46,6 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
     connectionAbort = abort;
     socket = ws;
     const current = () => revision === generation && socket === ws && config.remoteControlEnabled;
-    const sendHello = () => ws.send(JSON.stringify({ type: 'device.hello', ...hello }));
     const auth = new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('Hub connection timed out')), 8000);
       rejectConnect = error => { clearTimeout(timer); reject(error); };
@@ -71,6 +79,10 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
           heartbeatTimer = setInterval(() => { if (current() && authenticated) sendHello(); }, 20000);
           publish();
           resolve(status());
+          return;
+        }
+        if (message.type === 'device.ping') {
+          if (current() && authenticated) ws.send(JSON.stringify({ type: 'device.pong', id: message.id }));
           return;
         }
         if (message.type !== 'rpc.request') return;
@@ -131,7 +143,12 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
     });
     return mutations;
   }
-  return { ready, status, set, reconnect: () => ready.then(connect),
+  return { ready, status, set,
+    reconnect: () => ready.then(() => {
+      if (authenticated && heartbeat()) return status();
+      if (authenticated) close();
+      return connect();
+    }),
     isConnected: () => authenticated && !!config.remoteControlEnabled,
     dispose: () => { generation++; close(); } };
 }

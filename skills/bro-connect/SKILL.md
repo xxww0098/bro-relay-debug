@@ -60,19 +60,27 @@ to a different browser tool: it may control another browser or login session.
 ## User takeover and result verification
 
 Action batches and `eval` temporarily show a read-only screenshot preview while
-the source page runs in the background. Even a read-only `eval` can trigger this
-preview; prefer `read` or `observe` when they suffice. Do not click, type into, or
-navigate the preview. Completion closes it and returns to the source page unless
-the user has switched elsewhere.
+the source page runs in the background. The pointer is drawn on that preview, not
+in screenshot pixels. Even a read-only `eval` can trigger this preview; prefer
+`read` or `observe` when they suffice. Do not click, type into, or navigate the
+preview.
+
+When the requested work is finished — success, failure, or you are stopping —
+run `release --tab TAB_ID` on the same source page ID you have been using. That
+dismisses the pointer and closes the preview. The operator must see the source
+page without a cursor before you treat the remote task as done. `disconnect`
+only forgets the local credential; it does not end control on the browser.
+
+Completion of an action batch is not the same as ending control. An overlay
+animation, an accepted job, or a successful connection is not task completion.
 
 “停止并接管” cancels running/queued control tasks and disables remote control.
 Treat that as the user taking over; do not automatically re-enable control or
 resume cancelled work. Completed actions are not rolled back.
 
 Verify the requested outcome from fresh page state (for example a saved value,
-confirmation, or resulting URL). An accepted asynchronous job, a click result,
-an overlay animation, or a successful connection alone is not task completion.
-Report what succeeded, any partial/uncertain outcome, and what remains.
+confirmation, or resulting URL). Report what succeeded, any partial/uncertain
+outcome, and what remains.
 
 ## Recovery
 

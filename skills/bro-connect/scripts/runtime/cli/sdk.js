@@ -118,6 +118,52 @@ export async function status(connection, options = {}) {
   return responseJson(response);
 }
 
+const HELLO_FRESH_MS = 22_000;
+
+export function capabilitiesFromHello(hello) {
+  const protocolVersion = hello?.executor?.protocolVersion ?? hello?.protocolVersion;
+  const features = hello?.executor?.features ?? hello?.capabilities;
+  return {
+    protocolVersion: Number.isInteger(protocolVersion) ? protocolVersion : undefined,
+    features: Array.isArray(features) ? features : undefined,
+  };
+}
+
+export function isHelloFresh(current, now = Date.now(), maxAgeMs = HELLO_FRESH_MS) {
+  if (!current?.connected) return false;
+  const seen = Date.parse(current.lastSeen || current.connectedAt || '');
+  return Number.isFinite(seen) && now - seen <= maxAgeMs;
+}
+
+export async function handshake(connection, options = {}) {
+  const attempts = options.attempts ?? 3;
+  const retryDelayMs = options.retryDelayMs ?? 250;
+  let lastError;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const current = await status(connection, options);
+      const fromHello = capabilitiesFromHello(current.hello);
+      if (current.connected && isHelloFresh(current) && fromHello.protocolVersion === 2) {
+        return { connected: true, protocolVersion: 2, features: fromHello.features || [] };
+      }
+      if (!current.connected) {
+        throw new RelayError({ code: 'remote_device_offline', message: 'Remote Browser Relay device is offline', status: 409, retryable: true });
+      }
+      const capabilities = await createBrowser(connection, options).capabilities();
+      if (capabilities.protocolVersion !== 2) {
+        throw new RelayError({ code: 'incompatible_extension', message: 'Install the matching Bro Relay Debug extension', status: 409 });
+      }
+      return { connected: true, protocolVersion: 2, features: capabilities.features || [] };
+    } catch (error) {
+      lastError = error;
+      const retryable = error instanceof RelayError && error.code === 'remote_device_offline';
+      if (!retryable || i === attempts - 1) throw error;
+      await new Promise(resolve => setTimeout(resolve, retryDelayMs * (i + 1)));
+    }
+  }
+  throw lastError;
+}
+
 export function request(connection, method, path, body, options = {}) {
   return createBrowser(connection, options).request(method, path, body, options);
 }

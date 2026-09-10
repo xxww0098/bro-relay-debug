@@ -25,6 +25,7 @@ export async function buildSkill(root = fileURLToPath(new URL('../', import.meta
 }
 
 export async function build(root = fileURLToPath(new URL('../', import.meta.url))) {
+  const { version } = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   let env = {};
   try { env = parseEnv(await readFile(join(root, '.env'), 'utf8')); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -34,6 +35,7 @@ export async function build(root = fileURLToPath(new URL('../', import.meta.url)
   await writeFile(join(root, 'config.js'), config);
   await writeFile(join(root, 'extension/config.js'), config);
   const manifest = JSON.parse(await readFile(join(root, 'extension/manifest.json'), 'utf8'));
+  manifest.version = version;
   manifest.host_permissions = [`${hub}/*`];
   await writeFile(join(root, 'extension/manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
   await buildSkill(root);
@@ -43,10 +45,10 @@ export async function build(root = fileURLToPath(new URL('../', import.meta.url)
   await cp(join(root, 'extension'), join(dist, 'extension'), { recursive: true });
   await cp(join(root, 'LICENSE'), join(dist, 'extension/LICENSE'));
   await cp(join(root, 'THIRD_PARTY_NOTICES.md'), join(dist, 'extension/THIRD_PARTY_NOTICES.md'));
-  const archive = join(dist, 'bro-relay-debug-extension.zip');
+  const archive = join(dist, `bro-relay-debug-extension-${version}.zip`);
   await rm(archive, { force: true });
   execFileSync('zip', ['-qr', archive, '.'], { cwd: join(dist, 'extension') });
-  return { hub, extension: join(dist, 'extension'), archive };
+  return { version, hub, extension: join(dist, 'extension'), archive };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

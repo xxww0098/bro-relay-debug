@@ -67,6 +67,17 @@ not evidence of rollback. An interrupted click may already have taken effect.
 Resume only the uncompleted work once its state is known; never replay the
 entire batch automatically.
 
+## End control
+
+After the last authorized action, and before you report the remote task done:
+
+```sh
+node /path/to/bro-connect/scripts/bro.mjs release --tab TAB_ID
+```
+
+That dismisses the pointer and closes the preview. `disconnect` only removes the
+local credential; it does not end control on the browser.
+
 ## Debugging scripts
 
 Use `eval --tab TAB_ID --file /absolute/path/script.js` for page JavaScript when

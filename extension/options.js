@@ -1,32 +1,42 @@
 const $ = id => document.getElementById(id);
+$('extensionVersion').textContent = `v${chrome.runtime.getManifest().version}`;
 const toggle = $('remoteToggle'), state = $('remoteState'), id = $('remoteDeviceId');
-const status = $('remoteStatus'), regenerate = $('regenerateDevice'), stopTakeover = $('stopTakeover');
+const status = $('remoteStatus'), regenerate = $('regenerateDevice'), copy = $('copyDeviceId');
 function render(value = {}) {
   toggle.checked = !!value.enabled;
   id.value = value.deviceId || '';
   state.textContent = value.enabled ? value.connected ? '已连接' : '连接中' : '关闭';
   state.className = value.connected ? 'connected' : '';
-  $('takeoverStop').hidden = !value.enabled;
   $('remoteDetails').hidden = !value.enabled;
   status.className = value.lastError ? 'status error' : 'status';
   status.textContent = value.enabled
-    ? value.connected ? '远程中继已连接。' : value.lastError ? `连接暂不可用：${value.lastError}` : '正在连接远程中继…'
-    : '启用后，将显示驱动 ID。';
+    ? value.connected ? '' : value.lastError ? `连接暂不可用：${value.lastError}` : '连接中…'
+    : '开启后获取 ID。';
 }
 async function update(enabled, rotate = false) {
-  toggle.disabled = regenerate.disabled = stopTakeover.disabled = true;
+  toggle.disabled = regenerate.disabled = copy.disabled = true;
   try { render(await chrome.runtime.sendMessage({ type: 'setRemoteControl', enabled, rotate })); }
   catch (error) { status.textContent = error.message; status.className = 'status error'; }
-  finally { toggle.disabled = regenerate.disabled = stopTakeover.disabled = false; }
+  finally { toggle.disabled = regenerate.disabled = copy.disabled = false; }
 }
 toggle.addEventListener('change', () => update(toggle.checked));
 regenerate.addEventListener('click', () => update(true, true));
-stopTakeover.addEventListener('click', () => update(false));
-id.addEventListener('click', async () => {
+async function copyId() {
   id.select();
-  try { await navigator.clipboard.writeText(id.value); status.textContent = '驱动 ID 已复制。'; }
-  catch { status.textContent = 'ID 已选中，可按 Ctrl/Cmd+C 复制。'; }
-});
+  try {
+    await navigator.clipboard.writeText(id.value);
+    status.className = 'status';
+    status.textContent = '已复制。';
+  }
+  catch {
+    id.focus();
+    id.select();
+    status.className = 'status error';
+    status.textContent = '自动复制失败，ID 已选中，请按 Ctrl/Cmd+C 复制。';
+  }
+}
+copy.addEventListener('click', copyId);
+id.addEventListener('click', copyId);
 chrome.runtime.onMessage.addListener(message => {
   if (message?.type === 'remoteStatusChanged') render(message);
 });
