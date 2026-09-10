@@ -104,3 +104,19 @@ test('device ping is answered without executing an RPC, and reconnect heartbeats
   assert.equal(h.control.isConnected(), true);
   assert.equal(h.sockets[0].readyState, 3);
 });
+
+test('changing Hub fences the old socket and rotates credentials', async t => {
+  const h = harness(); t.after(() => h.control.dispose()); await h.control.ready;
+  const first = await h.enable();
+  const old = h.sockets[0];
+  const changing = h.control.set({ enabled: true, hubUrl: 'https://second.example.com' });
+  await until(() => h.sockets.length === 2);
+  const next = h.sockets[1]; next.open(); next.message({ type: 'device.authenticated' });
+  const state = await changing;
+  assert.equal(new URL(next.url).origin, 'wss://second.example.com');
+  assert.equal(old.readyState, 3);
+  assert.notEqual(state.deviceId, first.deviceId);
+  assert.equal(state.hubUrl, 'https://second.example.com');
+  await assert.rejects(h.control.set({ enabled: true, hubUrl: 'https://bad.example/path' }));
+  assert.equal(h.control.status().hubUrl, 'https://second.example.com');
+});

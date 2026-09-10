@@ -3,6 +3,16 @@
 用一个驱动 ID 连接用户正在使用的 Chrome / Edge。远端电脑只安装扩展，
 无需 Node、SSH、本地守护进程或开放端口。代理端通过 CLI 操作已有登录态的页面。
 
+## Relay Shield 修复
+
+正式入口选定为 `https://relay.xxww.club`，继续使用 Cloudflare Worker。
+[实施计划](specs/relay-shield/README.md) 记录各阶段验证状态；尚未通过的远端网络验收不能视为已完成。
+
+扩展的“连接地址”可在运行时更换 Hub，并只请求该源的权限。切换入口会停止当前控制，
+重新配对后再使用；CLI 在 `connect` 时用 `--hub` 保存相同入口。
+`doctor --hub https://relay.xxww.club` 可在未配对时检查操作端的 DNS、TLS 和健康接口。
+本机探测成功不代表远端浏览器在线，远端也需独立验证连接。
+
 ## 部署到 Cloudflare
 
 Cloudflare 上部署的是 **Hub（Worker + Durable Objects）**。浏览器扩展交给用户安装，
@@ -145,8 +155,8 @@ CLI 已随 `skills/bro-connect/scripts/runtime` 内置；代理电脑只需 Node
 ### 后续更新与排查
 
 仅更新 Hub 代码且地址不变时，重新执行第 3 步的部署命令即可。
-如果改变 Hub 域名，需要重新构建、分发扩展，并更新代理端 CLI；
-用户用新压缩包覆盖原 `bro-relay-debug-extension` 解压目录后，在扩展管理页点击重新加载。
+改变 Hub 域名后，在扩展“连接地址”保存新源并授权，再在代理端重新连接；
+发布给新用户的默认入口则仍由构建配置生成。
 
 查看 Hub 的实时日志：
 

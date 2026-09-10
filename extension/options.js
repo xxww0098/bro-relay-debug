@@ -1,8 +1,13 @@
+import { validateHub } from './hub-url.js';
 const $ = id => document.getElementById(id);
 $('extensionVersion').textContent = `v${chrome.runtime.getManifest().version}`;
 const toggle = $('remoteToggle'), state = $('remoteState'), id = $('remoteDeviceId');
 const status = $('remoteStatus'), regenerate = $('regenerateDevice'), copy = $('copyDeviceId');
 function render(value = {}) {
+  if (document.activeElement !== $('hubUrl')) $('hubUrl').value = value.hubUrl || '';
+  const d = value.diagnostic;
+  $('connectionDiagnostic').textContent = d ? `最近连接：${d.outcome === 'passed' ? '成功' : d.outcome === 'pending' ? '进行中' : '失败'} · ${new Date(d.observedAt).toLocaleTimeString()}` : '';
+  if (value.hubUrl) $('hubSettings').querySelector('summary').textContent = `连接地址 · ${new URL(value.hubUrl).hostname}`;
   toggle.checked = !!value.enabled;
   id.value = value.deviceId || '';
   state.textContent = value.enabled ? value.connected ? '已连接' : '连接中' : '关闭';
@@ -42,4 +47,26 @@ chrome.runtime.onMessage.addListener(message => {
 });
 chrome.runtime.sendMessage({ type: 'getRemoteControlStatus' }).then(render).catch(error => {
   status.textContent = error.message; status.className = 'status error';
+});
+
+function checkHub() {
+  try { const origin = validateHub($('hubUrl').value); $('hubError').textContent = ''; $('hubUrl').removeAttribute('aria-invalid'); return origin; }
+  catch { $('hubError').textContent = '请输入 HTTPS 域名，不包含路径或查询参数。'; $('hubUrl').setAttribute('aria-invalid', 'true'); return null; }
+}
+$('hubUrl').addEventListener('blur', checkHub);
+$('hubForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const origin = checkHub();
+  if (!origin) { $('hubUrl').focus(); return; }
+  $('saveHub').disabled = true;
+  try {
+    const allowed = await chrome.permissions.request({ origins: [`${origin}/*`] });
+    if (!allowed) throw new Error('未授予访问权限，地址未更改。');
+    const result = await chrome.runtime.sendMessage({ type: 'setRemoteControl', enabled: toggle.checked, hubUrl: origin });
+    render(result);
+    if (result.lastError) throw new Error(result.lastError);
+    $('hubError').textContent = '';
+    status.textContent = '地址已保存。';
+  } catch (error) { $('hubError').textContent = error.message; }
+  finally { $('saveHub').disabled = false; }
 });

@@ -20,6 +20,17 @@
       <button id="regenerateDevice" type="button">重置 ID</button>
       <p class="hint">重置后旧 ID 失效。</p>
     </section>
+    <details id="hubSettings">
+      <summary>连接地址</summary>
+      <form id="hubForm">
+        <label for="hubUrl">Hub 地址</label>
+        <input id="hubUrl" type="url" required spellcheck="false" aria-describedby="hubHint hubError">
+        <p id="hubHint" class="hint">扩展与代理使用同一地址。更换后需要重新配对。</p>
+        <p id="hubError" class="status error" role="alert"></p>
+        <button id="saveHub" type="submit">保存地址</button>
+      </form>
+      <p id="connectionDiagnostic" class="hint"></p>
+    </details>
     <p id="remoteStatus" class="status" role="status" aria-live="polite">开启后获取 ID。</p>
   </main>
   <script type="module" src="options.js"></script>

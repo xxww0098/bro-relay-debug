@@ -62,6 +62,19 @@ try {
   assert.equal(await popup.getByRole('switch').count(), 1)
   assert.equal(await popup.locator('#regenerateDevice').isVisible(), false)
   await popup.screenshot({ path: join(artifacts, 'popup-disabled.png') })
+  await popup.locator('#hubSettings summary').click()
+  await popup.setViewportSize({ width: 352, height: 640 })
+  assert.equal(await popup.locator('#hubUrl').inputValue(), hub.url)
+  await popup.locator('#hubUrl').fill('https://relay.example.com/path')
+  await popup.locator('#saveHub').click()
+  assert.match(await popup.locator('#hubError').textContent(), /HTTPS/)
+  assert.equal(await popup.locator('#hubUrl').getAttribute('aria-invalid'), 'true')
+  await popup.screenshot({ path: join(artifacts, 'popup-settings-error.png') })
+  await popup.locator('#hubUrl').fill(hub.url)
+  await popup.locator('#hubUrl').blur()
+  await popup.screenshot({ path: join(artifacts, 'popup-settings.png') })
+  await popup.locator('#hubSettings summary').click()
+  await popup.setViewportSize({ width: 352, height: 420 })
 
   await popup.locator('#remoteToggle').check()
   try { await waitFor(async () => /已连接/.test(await popup.locator('#remoteState').textContent()), 10000) }
@@ -133,7 +146,7 @@ try {
   await writeFile(join(cliRoot, 'package.json'), '{"type":"module"}\n')
   // The copied SDK imports ../extension/protocol.js; provide that exact path.
   await mkdir(join(cliRoot, 'extension'))
-  await cp(join(root, 'extension', 'protocol.js'), join(cliRoot, 'extension', 'protocol.js'))
+  for (const file of ['protocol.js', 'hub-url.js']) await cp(join(root, 'extension', file), join(cliRoot, 'extension', file))
   const cliEnv = { ...process.env, BRO_RELAY_STATE_DIR: join(cliRoot, 'state') }
   const connected = await run(join(cliRoot, 'cli/index.js'), ['connect', secondId], { cwd: cliRoot, env: cliEnv })
   assert.equal(connected.code, 0, connected.stderr)

@@ -4,19 +4,12 @@ import { resolve, join } from 'node:path';
 import { parseEnv } from 'node:util';
 import { execFileSync } from 'node:child_process';
 
-export function validateHub(value) {
-  const url = new URL(value);
-  const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-  if ((url.protocol !== 'https:' && !(local && url.protocol === 'http:')) ||
-      url.username || url.password || url.search || url.hash || url.pathname !== '/') {
-    throw new Error('BRO_RELAY_HUB_URL must be an HTTPS origin (HTTP allowed for localhost tests).');
-  }
-  return url.origin;
-}
+import { validateHub } from '../extension/hub-url.js';
+export { validateHub };
 
 export async function buildSkill(root = fileURLToPath(new URL('../', import.meta.url))) {
   const runtime = join(root, 'skills/bro-connect/scripts/runtime');
-  for (const file of ['cli/index.js', 'cli/sdk.js', 'config.js', 'extension/protocol.js']) {
+  for (const file of ['cli/index.js', 'cli/sdk.js', 'cli/doctor.js', 'config.js', 'extension/protocol.js', 'extension/hub-url.js']) {
     await mkdir(resolve(runtime, file, '..'), { recursive: true });
     await cp(join(root, file), join(runtime, file));
   }
@@ -36,6 +29,8 @@ export async function build(root = fileURLToPath(new URL('../', import.meta.url)
   await writeFile(join(root, 'extension/config.js'), config);
   const manifest = JSON.parse(await readFile(join(root, 'extension/manifest.json'), 'utf8'));
   manifest.version = version;
+  manifest.optional_host_permissions = ['https://*/*'];
+  manifest.minimum_chrome_version = '116';
   manifest.host_permissions = [`${hub}/*`];
   await writeFile(join(root, 'extension/manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
   await buildSkill(root);

@@ -1,10 +1,15 @@
+import { validateHub } from './hub-url.js';
 // Owns the persisted switch/credential and exactly one authenticated socket.
-export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop, onStatus = () => {}, socketFactory = url => new WebSocket(url) }) {
+export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop, onStatus = () => {}, hasPermission = async () => true, socketFactory = url => new WebSocket(url) }) {
   let config = {}, generation = 0, socket, authenticated = false, connecting, connectionAbort;
   let reconnectTimer, heartbeatTimer, rejectConnect, mutations = Promise.resolve(), stopping = Promise.resolve();
-  let lastError = null, attempt = 0;
+  hubUrl = validateHub(hubUrl);
+  let lastError = null, attempt = 0, diagnostic = null;
+  function record(stage, outcome, started = Date.now(), code) {
+    diagnostic = { side: 'remote', origin: config.remoteHubUrl || hubUrl, stage, outcome, durationMs: Date.now() - started, observedAt: new Date().toISOString(), ...(code ? { code } : {}) };
+  }
   const status = () => ({ enabled: !!config.remoteControlEnabled, connected: authenticated,
-    deviceId: config.remoteDeviceId || '', lastError });
+    deviceId: config.remoteDeviceId || '', hubUrl: config.remoteHubUrl || hubUrl, diagnostic, lastError });
   const publish = () => onStatus(status());
   function close() {
     connectionAbort?.abort(); connectionAbort = undefined;
@@ -32,13 +37,26 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
     const delay = Math.min(1000 * 2 ** attempt++, 15000);
     reconnectTimer = setTimeout(() => { reconnectTimer = undefined; void connect(); }, delay);
   }
-  async function connect() {
+  function connect() {
+    if (connecting) return connecting;
+    const pending = connectOnce().finally(() => { if (connecting === pending) connecting = undefined; });
+    connecting = pending;
+    return pending;
+  }
+  async function connectOnce() {
     await stopping;
     if (!config.remoteControlEnabled) return status();
     if (authenticated) return status();
-    if (connecting) return connecting;
     const revision = generation;
-    const wsUrl = new URL('/v1/device/connect', hubUrl);
+    const origin = config.remoteHubUrl || hubUrl;
+    if (!(await hasPermission(origin))) {
+      if (revision === generation) { lastError = 'Hub permission required'; record('permission', 'failed', Date.now(), 'permission_required'); publish(); }
+      return status();
+    }
+    if (revision !== generation || !config.remoteControlEnabled) return status();
+    const started = Date.now();
+    record('ws_auth', 'pending', started);
+    const wsUrl = new URL('/v1/device/connect', origin);
     wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:';
     wsUrl.searchParams.set('routeId', config.remoteRouteId);
     const ws = socketFactory(wsUrl.href);
@@ -59,6 +77,7 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
         socket = undefined;
         clearInterval(heartbeatTimer);
         lastError = 'Hub disconnected';
+        record('ws_auth', 'failed', started, 'transport_failed');
         stopping = Promise.resolve(onStop());
         publish();
         schedule(revision);
@@ -73,6 +92,7 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
           rejectConnect = undefined;
           authenticated = true;
           lastError = null;
+          record('ws_auth', 'passed', started);
           attempt = 0;
           sendHello();
           // MV3 needs periodic traffic; merely keeping a WebSocket open is insufficient.
@@ -95,27 +115,31 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
         })();
       };
     });
-    const pending = auth.catch(error => {
+    return auth.catch(error => {
       if (revision !== generation) return status();
       if (socket === ws) close();
       lastError = error.message;
+      record('ws_auth', 'failed', started, 'transport_failed');
       publish();
       schedule(revision);
       return status();
-    }).finally(() => { if (connecting === pending) connecting = undefined; });
-    connecting = pending;
-    return pending;
+    });
   }
   const ready = (async () => {
     const revision = generation;
-    const stored = await storage.get(['remoteControlEnabled', 'remoteSecret', 'remoteRouteId', 'remoteDeviceId']);
+    const stored = await storage.get(['remoteControlEnabled', 'remoteSecret', 'remoteRouteId', 'remoteDeviceId', 'remoteHubUrl']);
     if (revision !== generation) return;
     config = stored;
+    try { config.remoteHubUrl = validateHub(config.remoteHubUrl || hubUrl); }
+    catch { config.remoteControlEnabled = false; lastError = 'Invalid saved Hub address'; }
     if (!config.remoteSecret || !config.remoteRouteId) config.remoteControlEnabled = false;
     publish();
     void connect();
   })();
-  function set({ enabled, rotate = false }) {
+  function set({ enabled, rotate = false, hubUrl: requestedHub }) {
+    let origin;
+    try { origin = validateHub(requestedHub ?? config.remoteHubUrl ?? hubUrl); }
+    catch (error) { return Promise.reject(error); }
     if (typeof enabled !== 'boolean' || typeof rotate !== 'boolean') return Promise.reject(new Error('Invalid switch state'));
     const revision = ++generation;
     // Fence the old socket immediately, even while an earlier connection is awaiting auth.
@@ -125,7 +149,10 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
     mutations = mutations.catch(() => {}).then(async () => {
       await stopped;
       if (revision !== generation) return status();
-      let saved = await storage.get(['remoteSecret', 'remoteRouteId', 'remoteDeviceId']);
+      let saved = await storage.get(['remoteSecret', 'remoteRouteId', 'remoteDeviceId', 'remoteHubUrl']);
+      if (origin !== (saved.remoteHubUrl || hubUrl)) {
+        saved = { remoteSecret: '', remoteRouteId: '', remoteDeviceId: '' };
+      }
       if (enabled && (!saved.remoteSecret || rotate)) {
         const bytes = crypto.getRandomValues(new Uint8Array(32));
         const secret = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -134,9 +161,9 @@ export function createRemoteControl({ storage, hubUrl, hello, onRequest, onStop,
           remoteRouteId: btoa(String.fromCharCode(...digest)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '').slice(0, 16) };
       }
       if (revision !== generation) return status();
-      await storage.set({ ...saved, remoteControlEnabled: enabled });
+      await storage.set({ ...saved, remoteHubUrl: origin, remoteControlEnabled: enabled });
       if (revision !== generation) return status();
-      config = { ...saved, remoteControlEnabled: enabled };
+      config = { ...saved, remoteHubUrl: origin, remoteControlEnabled: enabled };
       lastError = null;
       publish();
       return enabled ? connect() : status();

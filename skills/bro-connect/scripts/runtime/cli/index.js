@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { diagnose } from './doctor.js';
+import { HUB_URL } from '../config.js';
+import { validateHub } from '../extension/hub-url.js';
 import fs from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import os from 'node:os';
@@ -12,7 +15,7 @@ const connectionFile = path.join(directory, 'connection.json');
 let activeSecret;
 const usage = `bro-relay-debug <command> [--tab ID]
 
-connect <driver-id> | connect --stdin  Verify and save a connection
+connect <driver-id> [--hub ORIGIN] | connect --stdin  Verify and save a connection
 status | doctor                      Check saved connection and capabilities
 disconnect                           Remove the local saved credential
 release                              Dismiss the on-page pointer overlay
@@ -33,7 +36,7 @@ raw GET|POST /api/path [--file FILE]
 
 TARGET is an observed element ref or CSS selector. Multiple tabs require --tab.
 Actions return task identity and progress. Never replay a failed write blindly.
-Hub URL is fixed at build time. Driver IDs are credentials; prefer stdin.`;
+Use --hub on connect or doctor to select the Hub. Driver IDs are credentials; prefer stdin.`;
 
 function invalid(message) {
   throw new RelayError({ code: 'invalid_arguments', message, status: 400 });
@@ -112,7 +115,7 @@ async function main() {
   const { values: flags, positionals } = parseArgs({
     allowPositionals: true,
     options: {
-      help: { type: 'boolean', short: 'h' }, stdin: { type: 'boolean' },
+      hub: { type: 'string' }, help: { type: 'boolean', short: 'h' }, stdin: { type: 'boolean' },
       file: { type: 'string' }, out: { type: 'string' }, tab: { type: 'string' },
       timeout: { type: 'string' }, cursor: { type: 'string' },
       'no-observe': { type: 'boolean' },
@@ -123,6 +126,7 @@ async function main() {
   if (!command || command === 'help' || flags.help) return output({ ok: true, usage });
   if (command === 'connect') {
     const parsed = parseDriverId(flags.stdin ? await readDriverId() : args[0]);
+    parsed.hubUrl = validateHub(flags.hub ?? HUB_URL);
     activeSecret = parsed.driverId;
     const verified = await handshake(parsed);
     await saveConnection(parsed);
@@ -134,8 +138,19 @@ async function main() {
   }
   const commands = ['status', 'doctor', 'tabs', 'release', 'state', 'read', 'observe', 'find', 'extract', 'screenshot', 'eval', 'actions', 'navigate', 'click', 'fill', 'type', 'key', 'scroll', 'wait', 'network', 'console', 'task', 'raw'];
   if (!commands.includes(command)) invalid(`Unknown command. Run --help.`);
+  if (command === 'doctor') {
+    let saved;
+    try { saved = await connection(); } catch (error) { if (error.code !== 'not_connected') throw error; }
+    const hubUrl = validateHub(flags.hub ?? saved?.hubUrl ?? HUB_URL);
+    const report = await diagnose(hubUrl);
+    if (report.ok && saved && (!flags.hub || hubUrl === (saved.hubUrl ?? HUB_URL))) {
+      try { const verified = await handshake(saved, { hubUrl }); report.connected = verified.connected; report.checks.at(-1).outcome = 'passed'; }
+      catch (error) { report.ok = false; report.checks.at(-1).outcome = 'failed'; report.checks.at(-1).code = error.code || 'rpc_failed'; }
+    }
+    output(report); if (!report.ok) process.exitCode = 1; return;
+  }
   const saved = await connection();
-  if (command === 'status' || command === 'doctor') {
+  if (command === 'status') {
     const verified = await handshake(saved);
     return output({ ok: true, connected: verified.connected, protocolVersion: verified.protocolVersion, features: verified.features });
   }

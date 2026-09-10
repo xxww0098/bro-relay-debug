@@ -1,4 +1,5 @@
 // Browser execution derives from Browser Relay (MIT); transport is remote-only.
+import { validateHub } from './hub-url.js';
 import { HUB_URL } from './config.js';
 import { createRemoteControl } from './remote-control.js';
 import { createAutomation } from './automation.js';
@@ -333,6 +334,7 @@ let automation = createAutomation({
 });
 const control = createRemoteControl({
   storage: chrome.storage.local, hubUrl: HUB_URL,
+  hasPermission: origin => chrome.permissions.contains({ origins: [`${origin}/*`] }),
   hello: { version: chrome.runtime.getManifest().version, protocolVersion: PROTOCOL_VERSION, deviceName: 'Bro Relay Debug', capabilities: FEATURES, executor: executorInfo() },
   onRequest: (message, signal) => executeRemoteApi(message.method, message.path, message.body, signal),
   onStop: stopControl,
@@ -362,7 +364,13 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     return false;
   }
   if (message?.type === 'setRemoteControl') {
-    control.set({ enabled: message.enabled, rotate: message.rotate ?? false }).then(respond, error => respond({ ...control.status(), lastError: error.message }));
+    void (async () => {
+      if (message.hubUrl !== undefined) {
+        const origin = validateHub(message.hubUrl);
+        if (!(await chrome.permissions.contains({ origins: [`${origin}/*`] }))) throw new Error('请先允许访问此 Hub 地址');
+      }
+      return control.set({ enabled: message.enabled, rotate: message.rotate ?? false, hubUrl: message.hubUrl });
+    })().then(respond, error => respond({ ...control.status(), lastError: error.message }));
     return true;
   }
   if (message?.type === 'getRemoteControlStatus') {
@@ -400,4 +408,11 @@ chrome.alarms.onAlarm.addListener(async ({ name }) => {
       await chrome.debugger.detach({ tabId }).catch(() => {});
     }
   }
+});
+
+chrome.permissions.onRemoved.addListener(() => {
+  const current = control.status();
+  void chrome.permissions.contains({ origins: [`${current.hubUrl}/*`] }).then(allowed => {
+    if (!allowed && control.status().hubUrl === current.hubUrl) return control.set({ enabled: false });
+  });
 });

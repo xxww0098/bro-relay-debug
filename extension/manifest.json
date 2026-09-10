@@ -24,5 +24,9 @@
   "options_ui": {
     "page": "options.html",
     "open_in_tab": true
-  }
+  },
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
+  "minimum_chrome_version": "116"
 }

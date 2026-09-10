@@ -45,3 +45,10 @@ button:hover { background: #e9eee9; }
 @media (prefers-color-scheme: dark) { #extensionVersion { color: #b0beb4; } }
 
 .status:empty { display: none; }
+
+#hubSettings { margin-top: 20px; border-top: 1px solid #b7c4ba; padding-top: 16px; font-size: 12px; }
+summary { cursor: pointer; overflow-wrap: anywhere; line-height: 1.6; }
+#hubForm { margin-top: 16px; }
+#hubForm label { display: block; margin-bottom: 8px; font-weight: 600; }
+#hubUrl { width: 100%; min-height: 44px; padding: 10px; border: 1px solid #88978e; border-radius: 8px; font: inherit; background: transparent; color: inherit; }
+#saveHub { margin-top: 12px; min-height: 44px; }

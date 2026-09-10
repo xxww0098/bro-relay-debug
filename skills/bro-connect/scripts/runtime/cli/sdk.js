@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { validateHub } from '../extension/hub-url.js';
 import { HUB_URL } from '../config.js';
 import { isTaskRequest } from '../extension/protocol.js';
 
@@ -23,14 +24,8 @@ export class RelayError extends Error {
   }
 }
 
-function endpoint(options) {
-  // The build owns the public endpoint; dependency injection is for tests/SDK callers.
-  const url = new URL(options.hubUrl ?? HUB_URL);
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) {
-    throw new Error('Hub requires HTTPS');
-  }
-  if (url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('Hub must be a plain origin');
-  return url.origin;
+function endpoint(options, connection = {}) {
+  return validateHub(options.hubUrl ?? connection.hubUrl ?? HUB_URL);
 }
 
 function credentials(connection) {
@@ -52,7 +47,7 @@ async function responseJson(response) {
 
 export function createBrowser(connection, options = {}) {
   const fetchImpl = options.fetch ?? globalThis.fetch;
-  const hub = endpoint(options);
+  const hub = endpoint(options, connection);
   const { secret, routeId } = credentials(connection);
   async function request(method, path, body, { signal, timeoutMs = 35000 } = {}) {
     if (signal?.aborted) throw new RelayError({ code: 'request_cancelled', message: 'Request cancelled before dispatch', status: 409, retryable: false });
@@ -111,7 +106,7 @@ export function createBrowser(connection, options = {}) {
 
 export async function status(connection, options = {}) {
   const { secret, routeId } = credentials(connection);
-  const response = await (options.fetch ?? globalThis.fetch)(`${endpoint(options)}/v1/status/${routeId}`, {
+  const response = await (options.fetch ?? globalThis.fetch)(`${endpoint(options, connection)}/v1/status/${routeId}`, {
     redirect: 'error', headers: { Authorization: `Bearer ${secret}` },
     signal: AbortSignal.timeout(options.timeoutMs ?? 10000),
   });
