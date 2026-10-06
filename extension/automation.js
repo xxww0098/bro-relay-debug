@@ -1148,6 +1148,10 @@ export function createAutomation({
       return { focused: true };
     }
     if (type === "navigate") {
+      await actionOverlay(
+        tabId,
+        showActionOverlay(undefined, undefined, undefined, "打开页面"),
+      );
       const before = await cdp(tabId, "Page.getFrameTree");
       const result = await cdp(tabId, "Page.navigate", { url: action.url });
       if (result.errorText) fail("navigation_failed", result.errorText, 422);
@@ -1178,10 +1182,23 @@ export function createAutomation({
       return { navigated: true, waitUntil: action.waitUntil || "interactive" };
     }
     if (type === "key") {
+      await actionOverlay(
+        tabId,
+        showActionOverlay(
+          undefined,
+          undefined,
+          undefined,
+          `按键 ${compact(action.key, 40)}`,
+        ),
+      );
       await key(tabId, action.key);
       return { pressed: true };
     }
     if (type === "wait") {
+      await actionOverlay(
+        tabId,
+        showActionOverlay(undefined, undefined, undefined, "等待目标"),
+      );
       const deadline = Date.now() + integer(action.timeoutMs, 5000, 1, 20000),
         stateName = action.state || "visible";
       do {
@@ -1297,6 +1314,15 @@ export function createAutomation({
     }
     if (type === "select") {
       if (!node) fail("invalid_target", `${type} requires a target`);
+      await actionOverlay(
+        tabId,
+        showActionOverlay(rect.x + targetOffset.x, rect.y + targetOffset.y, {
+          x: rect.x + targetOffset.x - rect.width / 2,
+          y: rect.y + targetOffset.y - rect.height / 2,
+          width: rect.width,
+          height: rect.height,
+        }, "选择"),
+      );
       return nodeCall(tabId, node, type, action);
     }
     if (type === "check") {
@@ -1332,6 +1358,16 @@ export function createAutomation({
         : undefined;
       let elementScrolled;
       if (node) {
+        const scrollOffset = await frameOffset(tabId, node.frameId);
+        await actionOverlay(
+          tabId,
+          showActionOverlay(rect.x + scrollOffset.x, rect.y + scrollOffset.y, {
+            x: rect.x + scrollOffset.x - rect.width / 2,
+            y: rect.y + scrollOffset.y - rect.height / 2,
+            width: rect.width,
+            height: rect.height,
+          }, "滚动"),
+        );
         const scrolled = await nodeCall(tabId, node, "scroll", action);
         elementScrolled = !!scrolled?.moved;
       } else {
@@ -1344,6 +1380,10 @@ export function createAutomation({
                 x: before.viewport.width / 2,
                 y: before.viewport.height / 2,
               },
+        );
+        await actionOverlay(
+          tabId,
+          showActionOverlay(at.x, at.y, undefined, "滚动"),
         );
         await cdp(tabId, "Input.dispatchMouseEvent", {
           type: "mouseWheel",
@@ -1472,6 +1512,11 @@ export function createAutomation({
           clickCount: 1,
         });
         pressed = true;
+        await actionOverlay(
+          tabId,
+          showActionOverlay(end.x, end.y, undefined, "拖动"),
+          false,
+        );
         for (const dest of path) {
           const goal = await point(tabId, {
             ...dest,
@@ -1503,6 +1548,11 @@ export function createAutomation({
             clickCount: 1,
           });
       }
+      await actionOverlay(
+        tabId,
+        showActionOverlay(end.x, end.y, undefined, "放置"),
+        false,
+      );
       return { dragged: true, end };
     }
     for (let i = 1; i <= clickCount; i++) {
